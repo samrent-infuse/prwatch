@@ -13,6 +13,7 @@ REPO = f"{OWNER}/{NAME}"
 QUERY = """
 query($owner:String!, $name:String!) {
   repository(owner:$owner, name:$name) {
+    defaultBranchRef { target { oid } }
     pullRequests(states:OPEN, first:60, orderBy:{field:UPDATED_AT, direction:DESC}) {
       nodes {
         number title isDraft baseRefName headRefOid author { login }
@@ -69,8 +70,18 @@ def check_list(nodes):
     return out
 
 
+_MASTER_HEAD = ""
+
+
+def master_head():
+    """The default branch's head as read by the last open_prs() call ("" before the first)."""
+    return _MASTER_HEAD
+
+
 def open_prs():
+    global _MASTER_HEAD
     data = json.loads(gh("api", "graphql", "-f", f"query={QUERY}", "-F", f"owner={OWNER}", "-F", f"name={NAME}"))
+    _MASTER_HEAD = (((data["data"]["repository"].get("defaultBranchRef") or {}).get("target")) or {}).get("oid", "")
     snaps = []
     for n in data["data"]["repository"]["pullRequests"]["nodes"]:
         snaps.append(Snapshot(

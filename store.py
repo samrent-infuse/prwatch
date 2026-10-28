@@ -52,6 +52,19 @@ CREATE TABLE IF NOT EXISTS jobs (
   updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+-- One row per reference leaf the brain refresh follows. sync_sha: the master commit the leaf was last
+-- checked against. state: ok, due (its named files changed since), stuck (needs a person).
+CREATE TABLE IF NOT EXISTS brain_leaves (
+  slug TEXT PRIMARY KEY,
+  path TEXT NOT NULL DEFAULT '',
+  sync_sha TEXT NOT NULL DEFAULT '',
+  synced_at TEXT NOT NULL DEFAULT '',
+  touched_at TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL DEFAULT 'ok',
+  tries INTEGER NOT NULL DEFAULT 0,
+  next_try_at TEXT NOT NULL DEFAULT '',
+  last_error TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -151,6 +164,24 @@ class Store:
     def recent_posted(self, limit=10):
         return self.db.execute("SELECT * FROM jobs WHERE state IN ('posted','dropped','stuck') "
                                "ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
+
+    # ---- brain leaves
+
+    def brain_rows(self):
+        return self.db.execute("SELECT * FROM brain_leaves ORDER BY slug").fetchall()
+
+    def brain_row(self, slug):
+        return self.db.execute("SELECT * FROM brain_leaves WHERE slug=?", (slug,)).fetchone()
+
+    def brain_upsert(self, slug, **fields):
+        if self.brain_row(slug) is None:
+            cols = ["slug", *fields]
+            self.db.execute(f"INSERT INTO brain_leaves ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                            [slug, *fields.values()])
+        elif fields:
+            self.db.execute(f"UPDATE brain_leaves SET {','.join(k + '=?' for k in fields)} WHERE slug=?",
+                            [*fields.values(), slug])
+        self.db.commit()
 
     # ---- meta (auth pause)
 

@@ -6,12 +6,15 @@ os.environ.update(PRWATCH_ME="me,me-alt", PRWATCH_REVIEWER="reviewer-bot",
                   PRWATCH_SETTLE_MIN="30", PRWATCH_SKIP_TITLE="do not review",
                   PRWATCH_MAX_CHANGE_ROUNDS="2")
 
+import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import brain
+import brain_run
 
 LEAVES = {
     "gotchas/gotcha-a.md": ("gotcha", "2026-09-01", "current", "Boot DDL in `inkhub_platform/api/main.py` locks."),
@@ -110,6 +113,102 @@ class Ground(VaultCase):
         self.assertIn("do not argue it again", text)
         self.assertIn("can be stale", text)
         self.assertEqual(dirs, ["--add-dir", str(self.vault)])
+
+
+class RepoCase(VaultCase):
+    """A vault plus a git repo whose commits carry dates, with review.REPO_DIR pointed at it."""
+
+    def git(self, *args, date=None):
+        env = {**os.environ, **({"GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date} if date else {})}
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=self.repo, env=env,
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    def commit(self, files, msg, date):
+        for name, text in files.items():
+            p = self.repo / name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text)
+        self.git("add", "-A")
+        self.git("commit", "-qm", msg, date=date)
+        return self.git("rev-parse", "HEAD")
+
+    def setUp(self):
+        super().setUp()
+        import review
+        import store
+        self.repo = self.vault.parent / "repo"
+        self.repo.mkdir()
+        self.git("init", "-q", "-b", "main")
+        self.base = self.commit({"inkhub_platform/api/routes.py": "a\n", "inkhub_platform/api/other.py": "o\n"},
+                                "base", "2026-01-02T10:00:00Z")
+        self.head_tests_only = self.commit({"tests/test_x.py": "t\n", "README.md": "r\n"},
+                                           "tests (#7)", "2026-03-01T10:00:00Z")
+        self.head_touching_named = self.commit({"inkhub_platform/api/routes.py": "b\n"},
+                                               "routes (#8)", "2026-05-01T10:00:00Z")
+        self.git("update-ref", f"refs/remotes/origin/{review.BASE_BRANCH}", self.head_touching_named)
+        self.git("checkout", "-q", "-b", "renamed", self.base)
+        self.git("mv", "inkhub_platform/api/routes.py", "inkhub_platform/api/routes2.py")
+        self.git("commit", "-qm", "rename", date="2026-02-01T10:00:00Z")
+        self.head_renamed = self.git("rev-parse", "HEAD")
+        mock.patch.object(review, "REPO_DIR", self.repo).start()
+        self.store = store.Store(str(self.vault.parent / "s.db"))
+        self.addCleanup(self.store.db.close)
+        self.index = brain.build_index(self.vault)
+
+    def store_row(self, slug):
+        return self.store.brain_row(slug)
+
+
+class Scan(RepoCase):
+    def setUp(self):
+        super().setUp()
+        self.store.brain_upsert("ref-b", path="reference/ref-b.md", sync_sha=self.base, state="ok")
+
+    def test_scan_marks_due_only_on_named_file_change(self):
+        self.assertEqual(brain_run.scan(self.store, self.index, self.head_touching_named), ["ref-b"])
+        self.assertEqual(self.store_row("ref-b")["state"], "due")
+        self.assertTrue(self.store_row("ref-b")["touched_at"])
+
+    def test_scan_moves_sync_when_only_tests_or_other_files_changed(self):
+        self.assertEqual(brain_run.scan(self.store, self.index, self.head_tests_only), [])
+        self.assertEqual(self.store_row("ref-b")["sync_sha"], self.head_tests_only)
+        self.assertEqual(self.store_row("ref-b")["state"], "ok")
+
+    def test_unrelated_master_move_does_not_restart_the_settle_wait(self):
+        brain_run.scan(self.store, self.index, self.head_touching_named)
+        self.store.brain_upsert("ref-b", touched_at="2026-01-01T00:00:00Z")
+        self.git("checkout", "-q", "main")
+        later =self.commit({"inkhub_platform/api/other.py": "o2\n"}, "other (#9)", "2026-06-01T10:00:00Z")
+        brain_run.scan(self.store, self.index, later, prev_head=self.head_touching_named)
+        self.assertEqual(self.store_row("ref-b")["touched_at"], "2026-01-01T00:00:00Z")
+        again = self.commit({"inkhub_platform/api/routes.py": "c\n"}, "routes again (#10)", "2026-06-02T10:00:00Z")
+        brain_run.scan(self.store, self.index, again, prev_head=later)
+        self.assertNotEqual(self.store_row("ref-b")["touched_at"], "2026-01-01T00:00:00Z")
+
+    def test_rename_or_delete_of_named_file_counts(self):
+        self.assertEqual(brain_run.changed_named_files(self.base, self.head_renamed, ["inkhub_platform/api/routes.py"]),
+                         ["inkhub_platform/api/routes.py"])
+        self.assertEqual(brain_run.changed_named_files(self.base, self.head_tests_only,
+                                                       ["inkhub_platform/api/routes.py"]), [])
+
+    def test_unknown_sync_sha_reanchors_from_as_of(self):
+        self.store.brain_upsert("ref-b", sync_sha="0" * 40, state="ok")
+        self.assertIsNone(brain_run.changed_named_files("0" * 40, self.head_tests_only, ["x.py"]))
+        brain_run.scan(self.store, self.index, self.head_tests_only)
+        self.assertEqual(self.store_row("ref-b")["sync_sha"], self.head_tests_only)
+
+    def test_anchor_is_last_commit_on_or_before_as_of(self):
+        self.assertEqual(brain_run.anchor("2026-01-02"), self.base)
+        self.assertEqual(brain_run.anchor("2026-04-20"), self.head_tests_only)
+        self.assertEqual(brain_run.anchor("undated"), "")
+
+    def test_master_head_comes_from_the_tick_query(self):
+        import fetch
+        data = {"data": {"repository": {"defaultBranchRef": {"target": {"oid": "abc"}},
+                                        "pullRequests": {"nodes": []}}}}
+        with mock.patch.object(fetch, "gh", return_value=json.dumps(data)):
+            fetch.open_prs()
+        self.assertEqual(fetch.master_head(), "abc")
 
 
 if __name__ == "__main__":
