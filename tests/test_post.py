@@ -203,6 +203,53 @@ class Compare(unittest.TestCase):
         self.assertIn("compare.txt", text)
 
 
+class ReviewerBrief(unittest.TestCase):
+    def test_brief_is_filled_by_code_from_the_inputs(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        inputs = Path(tmp.name)
+        (inputs / "pr.md").write_text("# Fix the thing\n\nAuthor: bob\n\nbody\n")
+        (inputs / "input.diff").write_text("diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1,2 @@\n-a\n+b\n+c\n"
+                                           "diff --git a/y.py b/y.py\n--- a/y.py\n+++ b/y.py\n@@ -1 +1 @@\n+d\n")
+        (inputs / "previous.md").write_text("earlier")
+        brief = review.reviewer_brief(inputs, 7, "h" * 40, "b" * 40)
+        self.assertIn('pull request #7 of example-org/example-repo, "Fix the thing" by bob', brief)
+        self.assertIn("2 files, +3 -1", brief)
+        self.assertIn(f"{inputs}/previous.md", brief)
+        self.assertNotIn("conversation.md", brief)
+        self.assertNotIn("{", brief)  # every placeholder filled
+        self.assertNotIn("—", brief)
+
+    def test_run_prompt_dispatches_the_brief_and_reads_no_skill_files(self):
+        self.assertNotIn("SKILL.md", review.PROMPT)
+        self.assertIn("reviewer-prompt.md", review.PROMPT)
+
+
+class Ledger(unittest.TestCase):
+    def test_a_call_records_its_reviewer_model(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = Store(f"{tmp.name}/s.db")
+        self.addCleanup(store.db.close)
+        store.end_call(store.start_call(1, "review", "opus", "h", "r"), "verdict comment",
+                       {"in_tokens": 1, "out_tokens": 2, "cache_read": 3, "cache_write": 4, "cost_usd": 0.5,
+                        "reviewer": "sonnet"})
+        self.assertEqual(store.db.execute("select reviewer from calls").fetchone()[0], "sonnet")
+        self.assertEqual(store.reviewers_today(), {"sonnet": 1})
+
+
+class MeasureContext(unittest.TestCase):
+    def test_measure_reports_the_fixed_context_of_a_lean_run(self):
+        out = json.dumps({"total_cost_usd": 0.01, "modelUsage": {"claude-haiku-5-5": {
+            "inputTokens": 5, "outputTokens": 2, "cacheReadInputTokens": 9000, "cacheCreationInputTokens": 1000}}})
+        with mock.patch.object(review.subprocess, "run", return_value=mock.Mock(stdout=out, returncode=0)) as run:
+            got = review.measure_context()
+        self.assertEqual(got["context_tokens"], 10005)
+        args = run.call_args.args[0]
+        self.assertIn("--strict-mcp-config", args)
+        self.assertIn("haiku", args)
+
+
 class GitLock(unittest.TestCase):
     def test_fetch_and_worktree_hold_the_lock_reads_do_not(self):
         seen = {}

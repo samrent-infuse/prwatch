@@ -22,7 +22,7 @@ then decides the event, renders the review, posts it pinned to the reviewed comm
 | `prwatch.env.example` | Repository, logins, watched authors, models, limits. Copy to `prwatch.env`; the only settings file. |
 | `project-context.example.md` | What a reviewer must know about the repository. Copy to `project-context.md`. |
 | `AGENT.md` | Notes for a Claude session asked about the watcher, or to review a PR by hand. |
-| `prompts/` | Every prompt the model gets: `review.md`, `rereview.md`, `review-brain.md`, `review-base-moved.md`, `fix-draft.md`, `brain-refresh.md`. |
+| `prompts/` | Every prompt the model gets: `review.md` (the run), `reviewer.md` (the reviewer subagent's brief), `rereview.md`, `review-brain.md`, `review-base-moved.md`, `fix-draft.md`, `brain-refresh.md`. |
 | `prwatch/main.py` | The loop, the workers and the command line. |
 | `prwatch/decide.py` | The rules: which PRs need a review, a re-review, a reviewer request, a fix draft. Pure, tested. |
 | `prwatch/review.py` | Prepares a run (worktree, diff, PR text, earlier review, conversation, brain leaves) and runs claude. |
@@ -38,10 +38,9 @@ then decides the event, renders the review, posts it pinned to the reviewed comm
 ## Setup
 
 1. `cp prwatch.env.example prwatch.env` and `cp project-context.example.md project-context.md`; fill both in.
-2. Mount the superpowers skills: `compose.yaml` reads them from the Claude Code plugin cache; adjust the version.
-3. Claude token: `claude setup-token`, then from this folder
+2. Claude token: `claude setup-token`, then from this folder
    `powershell -ExecutionPolicy Bypass -File scripts\set-token.ps1` (reads it hidden, tests it, restarts).
-4. Start: `GH_TOKEN=$(gh auth token) docker compose up -d --build` (`gh auth token -u <login>` with several accounts).
+3. Start: `GH_TOKEN=$(gh auth token) docker compose up -d --build` (`gh auth token -u <login>` with several accounts).
 
 ## Try it by hand
 
@@ -93,10 +92,14 @@ ends with "Automated review (Claude Opus), reviewed at <sha7>." Hold labels and 
 | `PRWATCH_MAX_RUN_USD` | A run stops at this spend (claude's own estimate). |
 | `PRWATCH_DAILY_CAP`, `PRWATCH_PER_PR_CAP` | Model calls per day and per PR per day; 0 = no cap. |
 | `PRWATCH_MAX_PARALLEL` | Runs at once. |
+| `PRWATCH_ORCHESTRATOR_EFFORT`, `PRWATCH_FIX_MODEL` | Effort of the review run itself (the reviewer stays at high); model of fix drafts. |
 | `PRWATCH_SETTLE_MIN` | Quiet time before a re-review, so a burst of fix-up pushes costs one review. |
 | `PRWATCH_MAX_CHANGE_ROUNDS` | Change requests before automatic re-reviews stop. |
 
-Every call's tokens and list-price cost are in the `calls` table, today's totals in `state/status.json`.
+The reviewer's brief (`prompts/reviewer.md`, adapted from the superpowers code-reviewer template, MIT) is filled
+in by code, so a run never reads skill files. Every call's tokens, list-price cost and reviewer model are in the
+`calls` table, today's totals in `state/status.json`. `--measure-context` prints the fixed context a lean run
+starts from (one Haiku call, about a cent); check it after a Claude Code update.
 
 ## Operate
 

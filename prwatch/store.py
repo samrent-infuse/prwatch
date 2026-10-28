@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS calls (
   out_tokens INTEGER,   -- included); NULL when the call gave no JSON. cost_usd is claude's list-price
   cache_read INTEGER,   -- figure, not what the subscription token is billed
   cache_write INTEGER,
-  cost_usd REAL
+  cost_usd REAL,
+  reviewer TEXT         -- the reviewer subagent's model for a review (opus, or the small model)
 );
 -- One review per (PR, head): key review:<pr>:<head>. state: model (needs a verdict), post (verdict
 -- stored, not confirmed on GitHub), posted, dropped, stuck. The verdict is kept, so a retried post
@@ -86,6 +87,8 @@ class Store:
         for col, typ in USAGE_COLUMNS:
             if col not in have:  # databases created before the usage columns
                 self.db.execute(f"ALTER TABLE calls ADD COLUMN {col} {typ}")
+        if "reviewer" not in {r[1] for r in self.db.execute("PRAGMA table_info(calls)")}:
+            self.db.execute("ALTER TABLE calls ADD COLUMN reviewer TEXT")  # databases from before it
         have = {r[1] for r in self.db.execute("PRAGMA table_info(prs)")}
         for col, typ in (("head_seen", "TEXT NOT NULL DEFAULT ''"), ("head_seen_at", "TEXT NOT NULL DEFAULT ''"),
                          ("cap_commented", "INTEGER NOT NULL DEFAULT 0")):
@@ -130,9 +133,16 @@ class Store:
 
     def end_call(self, call_id, outcome, usage=None):
         u = usage or {}
-        self.db.execute("UPDATE calls SET outcome=?, " + ",".join(f"{c}=?" for c, _ in USAGE_COLUMNS)
-                        + " WHERE id=?", (outcome[:300], *(u.get(c) for c, _ in USAGE_COLUMNS), call_id))
+        self.db.execute("UPDATE calls SET outcome=?, reviewer=?, " + ",".join(f"{c}=?" for c, _ in USAGE_COLUMNS)
+                        + " WHERE id=?", (outcome[:300], u.get("reviewer"), *(u.get(c) for c, _ in USAGE_COLUMNS),
+                                          call_id))
         self.db.commit()
+
+    def reviewers_today(self):
+        """{reviewer model: reviews} over today's calls that ran a reviewer."""
+        day = utcnow().strftime("%Y-%m-%d")
+        return dict(self.db.execute("SELECT reviewer, COUNT(*) FROM calls WHERE substr(ts,1,10)=? AND reviewer IS NOT "
+                                    "NULL GROUP BY reviewer", (day,)).fetchall())
 
     def usage_today(self):
         """Sums over today's calls: in_tokens, out_tokens, cache_read, cache_write, cost_usd."""

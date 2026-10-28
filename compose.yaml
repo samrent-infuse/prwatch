@@ -19,7 +19,6 @@ services:
         required: false
     volumes:
       - ..:/inkhub                       # the parent folder: STOP, reviews/, this folder's logs
-      - ${USERPROFILE}/.claude/plugins/cache/superpowers-marketplace/superpowers/6.4.2/skills:/skills:ro
       - ${USERPROFILE}/.claude/.credentials.json:/host-claude/credentials.json:ro   # desktop login; read, never refreshed here
       - state:/data                      # SQLite stays off the Windows bind mount
       - repo:/repo

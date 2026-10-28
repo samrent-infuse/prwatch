@@ -222,7 +222,7 @@ def brain_status(store):
 
 def run_fix_draft(store, a):
     """Model run drafting fixes for one CHANGES_REQUESTED review on my PR. True when a draft was made."""
-    cid = store.start_call(a.pr, a.kind, review.MODEL, a.head, a.reason)
+    cid = store.start_call(a.pr, a.kind, act.FIX_MODEL, a.head, a.reason)
     try:
         outcome, usage = act.fix_draft(a.pr, a.head, a.review_id)
     except post.AuthBroken:
@@ -368,7 +368,7 @@ def write_status(store, me, state):
     status = {
         "tick": stamp(), "state": state, "login": me, "interval_s": INTERVAL, "dry_run": DRY,
         "approve_enabled": ALLOW_APPROVE, "request_changes_enabled": ALLOW_REQUEST_CHANGES, "claude_token": act.claude_ready(), "claude_auth": act.claude_auth.state()[1],
-        "model_calls_today": store.calls_today(), "daily_cap": DAILY_CAP, "usage_today": store.usage_today(), "brain": brain_status(store),
+        "model_calls_today": store.calls_today(), "daily_cap": DAILY_CAP, "usage_today": store.usage_today(), "reviewers_today": store.reviewers_today(), "brain": brain_status(store),
         "posts_waiting": len(store.jobs_in("post")),
         "stuck": [j["key"] for j in store.jobs_in("stuck")],
         "recent": [{"key": j["key"], "state": j["state"], "at": j["updated_at"], "error": j["last_error"]}
@@ -431,6 +431,7 @@ def main():
     ap.add_argument("--review", type=int, metavar="PR", help="review this PR now, whatever the rules say")
     ap.add_argument("--test", action="store_true", help="with --review: run it, print the review, post nothing")
     ap.add_argument("--reviewer-model", help="with --review: the reviewer subagent's model (e.g. sonnet)")
+    ap.add_argument("--measure-context", action="store_true", help="print the fixed context of a lean run")
     ap.add_argument("--budget-usd", type=float, default=5.0, help="with --brain-backfill: stop at this spend")
     ap.add_argument("--only", help="with --brain-backfill: comma-separated leaf slugs")
     ap.add_argument("--brain-undo", metavar="FOLDER/SLUG", help="restore a refreshed leaf's backup")
@@ -441,6 +442,9 @@ def main():
     brain.log_event = lambda msg: log(f"brain: {msg}")
     if args.brain_backfill or args.brain_undo:
         return brain_command(store, args)
+    if args.measure_context:
+        print(review.measure_context())
+        return 0
     if args.review:
         return hand_review(store, args.review, args.test, args.reviewer_model)
     global DRY, POOL

@@ -24,7 +24,6 @@ from prwatch import render
 from prwatch.fetch import REPO, gh
 
 REPO_DIR = Path(os.environ.get("REPO_DIR", "/repo"))
-SKILL_DIR = Path(os.environ.get("SKILL_DIR", "/skills/requesting-code-review"))
 WORK = Path(os.environ.get("PRWATCH_WORK", "/tmp/prwatch-work"))
 HERE = Path(os.environ.get("INKHUB_DIR", "/inkhub")) / "prwatch"
 STATE = HERE / "state"
@@ -36,7 +35,10 @@ _BRAIN = os.environ.get("PRWATCH_BRAIN_DIR", "/brain")
 BRAIN_DIR = Path(_BRAIN) if _BRAIN else None
 BRAIN_MAX_LEAVES = int(os.environ.get("PRWATCH_BRAIN_MAX_LEAVES", "12") or 12)
 BASE_BRANCH = os.environ.get("PRWATCH_BASE_BRANCH", "main")
-MODEL, EFFORT = "opus", "high"  # the run itself; its reviewer subagent is reviewer_model()
+# The run itself; its reviewer subagent is reviewer_model(). The run only writes questions, dispatches and
+# checks the findings, so a lower effort is a cost lever (PRWATCH_ORCHESTRATOR_EFFORT).
+MODEL = "opus"
+EFFORT = os.environ.get("PRWATCH_ORCHESTRATOR_EFFORT", "high").strip() or "high"
 # The reviewer subagent runs on REVIEWER_MODEL_SMALL instead of MODEL when the diff it reads has at most
 # SMALL_PR_MAX_LINES added plus removed lines and no changed path matches RISKY_PATHS. Empty = always MODEL.
 REVIEWER_MODEL_SMALL = os.environ.get("PRWATCH_REVIEWER_MODEL_SMALL", "").strip()
@@ -55,6 +57,13 @@ LEAN_ARGS = ["--setting-sources", "user", "--settings", json.dumps(LEAN_SETTINGS
              "--strict-mcp-config", "--no-chrome", "--disable-slash-commands"]
 
 PROMPT = prompts.load("review")
+# The reviewer subagent's brief (prompts/reviewer.md below its comment header), filled by reviewer_brief().
+BRIEF = prompts.load("reviewer").split("\n---\n", 1)[1]
+EXTRA_INPUTS = (("project-context.md", "what a reviewer must know about this repository"),
+                ("previous.md", "the review of the last reviewed head"),
+                ("conversation.md", "what people wrote on the PR since that review"),
+                ("brain.md", "project brain leaves about the changed files, copies under brain/"),
+                ("compare.txt", "the whole patch at the reviewed head compared with the patch now"))
 
 # The three below are appended to PROMPT's bullet list when they apply, so each starts on a new line.
 REREVIEW = "\n" + prompts.load("rereview")
@@ -223,6 +232,34 @@ def brain_note(inputs):
     return BRAIN.format(vault=BRAIN_DIR), ["--add-dir", str(BRAIN_DIR)]
 
 
+def reviewer_brief(inputs, n, head, base):
+    """The reviewer's complete brief, filled by code: PR, range, size and the inputs present. The run only
+    adds its questions, so it never reads the skill files or rewrites the brief."""
+    inputs = Path(inputs)
+    pr = (inputs / "pr.md").read_text(encoding="utf-8").splitlines()
+    title = pr[0].lstrip("# ").strip() if pr else ""
+    author = next((l.split(":", 1)[1].strip() for l in pr if l.startswith("Author:")), "")
+    diff = (inputs / "input.diff").read_text(encoding="utf-8").splitlines()
+    files = sum(1 for l in diff if l.startswith("diff --git "))
+    added = sum(1 for l in diff if l.startswith("+") and not l.startswith("+++ "))
+    removed = sum(1 for l in diff if l.startswith("-") and not l.startswith("--- "))
+    extra = "".join(f"\n- `{inputs}/{name}`: {what}." for name, what in EXTRA_INPUTS if (inputs / name).exists())
+    return BRIEF.format(pr=n, repo=REPO, title=title, author=author, head=head, base=base, inputs=inputs,
+                        size=f"{files} files, +{added} -{removed}", extra=extra)
+
+
+def measure_context():
+    """The fixed context every lean run starts from: one tiny Haiku call with the review run's flags (about a
+    cent). Check it after a Claude Code update."""
+    p = subprocess.run(["claude", "-p", "Reply with OK", "--model", "haiku", *LEAN_ARGS, "--restricted",
+                        "--tools", "Read,Grep,Glob,Agent", "--allowedTools", "Read", "Grep", "Glob", "Agent",
+                        "--permission-mode", "dontAsk", "--permission-prompts", "none", "--output-format", "json",
+                        "--no-session-persistence"], cwd=REPO_DIR, env=scrubbed_env(), capture_output=True,
+                       text=True, encoding="utf-8", timeout=120)
+    u = usage_of(json.loads(p.stdout))
+    return {"context_tokens": u["in_tokens"] + u["cache_read"] + u["cache_write"], "cost_usd": u["cost_usd"]}
+
+
 def budget_args():
     return ["--max-budget-usd", f"{MAX_RUN_USD:g}"] if MAX_RUN_USD > 0 else []
 
@@ -258,8 +295,9 @@ def run(n, head, base_prev="", prev_body="", reviewer=None):
             ("conversation.md", ", conversation.md (what people wrote on the PR since that review)"),
             ("brain.md", ", brain.md (project brain leaves about the changed files)"),
         ) if (inputs / name).exists())
+        (inputs / "reviewer-prompt.md").write_text(reviewer_brief(inputs, n, head, base), encoding="utf-8")
         prompt = PROMPT.format(
-            n=n, repo=REPO, skill=SKILL_DIR, inputs=inputs, base=base, head=head, notes=notes,
+            n=n, repo=REPO, inputs=inputs, base=base, head=head, notes=notes,
             range_note=BASE_MOVED.format(branch=BASE_BRANCH) if moved else "",
             rereview=REREVIEW if rereview else "", reviewer=reviewer, brain=brain_text)
         p = subprocess.run(
@@ -267,7 +305,7 @@ def run(n, head, base_prev="", prev_body="", reviewer=None):
              # --tools limits what exists; dontAsk then denies anything not in --allowedTools,
              # and Read is confined to the cwd plus the --add-dir folders.
              "--restricted", "--tools", "Read,Grep,Glob,Agent", "--allowedTools", "Read", "Grep", "Glob", "Agent",
-             "--add-dir", str(SKILL_DIR), "--add-dir", str(inputs), *brain_dirs,
+             "--add-dir", str(inputs), *brain_dirs,
              "--permission-mode", "dontAsk", "--permission-prompts", "none",
              "--output-format", "json", "--json-schema", json.dumps(render.SCHEMA),
              *budget_args(), "--no-session-persistence"],

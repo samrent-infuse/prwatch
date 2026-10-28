@@ -23,6 +23,8 @@ OUT = ROOT / "state"         # everything prwatch writes: logs, status.json, run
 DRAFTS = OUT / "drafts"
 REVIEWS = INKHUB / "reviews"
 STOP = INKHUB / "STOP"
+# Fix drafts on my PRs run on this model.
+FIX_MODEL = os.environ.get("PRWATCH_FIX_MODEL", "opus").strip() or "opus"
 
 FIX_PROMPT = prompts.load("fix-draft")
 
@@ -64,7 +66,7 @@ def fix_draft(n, head, review_id):
         prompt = FIX_PROMPT.format(n=n, repo=REPO, head=head, author=r["user"]["login"],
                                    body=r.get("body") or "(empty)", comments=inline)
         p = subprocess.run(
-            ["claude", "-p", prompt, "--model", review.MODEL, "--effort", review.EFFORT,
+            ["claude", "-p", prompt, "--model", FIX_MODEL, "--effort", review.EFFORT,
              # no settings, hooks, MCP servers or skills from the checkout; its CLAUDE.md stays readable
              "--setting-sources", "user", "--strict-mcp-config", "--no-chrome", "--disable-slash-commands",
              *review.budget_args(), "--restricted", "--tools", "Read,Edit,Write,Glob,Grep",
