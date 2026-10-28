@@ -89,6 +89,7 @@ def build_index(vault, cache=None):
         if leaf.status != "superseded":
             leaves.append(leaf)
     if cache:
+        Path(cache).parent.mkdir(parents=True, exist_ok=True)
         Path(cache).write_text(json.dumps({"key": key, "leaves": [{**asdict(l), "path": str(l.path)} for l in leaves]}),
                                encoding="utf-8")
     return leaves

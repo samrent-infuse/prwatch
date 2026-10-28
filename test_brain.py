@@ -76,6 +76,11 @@ class Index(VaultCase):
         (self.vault / "gotchas" / "gotcha-e.md").write_text(leaf_text("gotcha", "2026-10-01", "current", "x"))
         self.assertEqual(len(brain.build_index(self.vault, cache)), 5)
 
+    def test_index_cache_folder_is_created(self):
+        cache = self.vault.parent / "not-yet" / "index.json"
+        self.assertEqual(len(brain.build_index(self.vault, cache)), 4)
+        self.assertTrue(cache.exists())
+
     def test_match_ranks_exact_over_directory_over_package(self):
         got = brain.match(brain.build_index(self.vault), ["inkhub_platform/api/main.py"], 12)
         self.assertEqual([l.slug for l, _ in got], ["gotcha-a", "inv-d", "ref-b", "decision-c"])
