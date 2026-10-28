@@ -14,7 +14,10 @@ from pathlib import Path
 
 FOLDERS = ("reference", "gotchas", "decisions", "rejected", "investigations")
 TYPE_ORDER = ("gotcha", "decision", "rejected", "reference", "investigation")
-REPO_PATH = re.compile(r"(?:inkhub_[a-z_]+|api|deploy|scripts|tests)/[A-Za-z0-9_./-]+\.(?:py|ts|tsx|sql|tf|yml|yaml|sh)")
+# Top-level folders (regex alternatives, comma separated) whose code files a leaf can name; the default takes any.
+PATH_PREFIXES = os.environ.get("PRWATCH_BRAIN_PATH_PREFIXES", "").strip() or r"[A-Za-z0-9_][A-Za-z0-9_.-]*"
+REPO_PATH = re.compile(r"(?:" + "|".join(x.strip() for x in PATH_PREFIXES.split(",") if x.strip())
+                       + r")/[A-Za-z0-9_./-]+\.(?:py|ts|tsx|sql|tf|yml|yaml|sh)")
 
 
 def log_event(msg):

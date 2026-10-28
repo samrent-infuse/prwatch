@@ -4,7 +4,8 @@ import os
 os.environ.update(PRWATCH_ME="me,me-alt", PRWATCH_REVIEWER="reviewer-bot",
                   PRWATCH_REQUIRED_CHECK="scan-verdict", PRWATCH_REPO="example-org/example-repo",
                   PRWATCH_SETTLE_MIN="30", PRWATCH_SKIP_TITLE="do not review",
-                  PRWATCH_MAX_CHANGE_ROUNDS="2")
+                  PRWATCH_MAX_CHANGE_ROUNDS="2",
+                  PRWATCH_BRAIN_PATH_PREFIXES="app_[a-z_]+,api,deploy,scripts,tests")
 
 import datetime
 import json
@@ -18,12 +19,12 @@ import brain
 import brain_run
 
 LEAVES = {
-    "gotchas/gotcha-a.md": ("gotcha", "2026-09-01", "current", "Boot DDL in `inkhub_platform/api/main.py` locks."),
+    "gotchas/gotcha-a.md": ("gotcha", "2026-09-01", "current", "Boot DDL in `app_platform/api/main.py` locks."),
     "reference/ref-b.md": ("reference", "2026-04-20", "current",
-                           "Routes live in inkhub_platform/api/routes.py; the db listens on port 5432."),
-    "decisions/decision-c.md": ("decision", "2026-08-01", "current", "Workers: inkhub_platform/worker/x.py."),
-    "investigations/inv-d.md": ("investigation", "2026-10-01", "current", "Traced inkhub_platform/api/main.py."),
-    "reference/old-ref.md": ("reference", "2026-01-01", "superseded", "inkhub_platform/api/main.py once."),
+                           "Routes live in app_platform/api/routes.py; the db listens on port 5432."),
+    "decisions/decision-c.md": ("decision", "2026-08-01", "current", "Workers: app_platform/worker/x.py."),
+    "investigations/inv-d.md": ("investigation", "2026-10-01", "current", "Traced app_platform/api/main.py."),
+    "reference/old-ref.md": ("reference", "2026-01-01", "superseded", "app_platform/api/main.py once."),
 }
 
 
@@ -49,7 +50,7 @@ class VaultCase(unittest.TestCase):
             p = self.vault / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(leaf_text(t, a, s, body), encoding="utf-8")
-        (self.vault / "reference" / "MANIFEST.md").write_text("---\ntype: index\n---\n- [[ref-b]] inkhub_platform/api/main.py\n")
+        (self.vault / "reference" / "MANIFEST.md").write_text("---\ntype: index\n---\n- [[ref-b]] app_platform/api/main.py\n")
         (self.vault / "handoff").mkdir()
         (self.vault / "handoff" / "MANIFEST.md").write_text("---\ntype: index\n---\n# handoff/\n\n- [[x]] y\n")
         self.logs = mock.patch.object(brain, "log_event").start()
@@ -60,7 +61,7 @@ class Index(VaultCase):
     def test_index_reads_frontmatter_and_paths(self):
         leaf = {l.slug: l for l in brain.build_index(self.vault)}["gotcha-a"]
         self.assertEqual((leaf.type, leaf.as_of, leaf.folder), ("gotcha", "2026-09-01", "gotchas"))
-        self.assertEqual(leaf.repo_paths, ["inkhub_platform/api/main.py"])
+        self.assertEqual(leaf.repo_paths, ["app_platform/api/main.py"])
         self.assertEqual(leaf.tags, ["platform", "api"])
 
     def test_index_skips_superseded_manifest_and_unreadable(self):
@@ -86,26 +87,26 @@ class Index(VaultCase):
         self.assertTrue(cache.exists())
 
     def test_match_ranks_exact_over_directory_over_package(self):
-        got = brain.match(brain.build_index(self.vault), ["inkhub_platform/api/main.py"], 12)
+        got = brain.match(brain.build_index(self.vault), ["app_platform/api/main.py"], 12)
         self.assertEqual([l.slug for l, _ in got], ["gotcha-a", "inv-d", "ref-b", "decision-c"])
-        self.assertIn("names inkhub_platform/api/main.py", got[0][1])
+        self.assertIn("names app_platform/api/main.py", got[0][1])
 
     def test_investigation_only_on_exact_file(self):
-        got = brain.match(brain.build_index(self.vault), ["inkhub_platform/api/other.py"], 12)
+        got = brain.match(brain.build_index(self.vault), ["app_platform/api/other.py"], 12)
         self.assertNotIn("inv-d", [l.slug for l, _ in got])
-        got = brain.match(brain.build_index(self.vault), ["inkhub_platform/api/main.py"], 12)
+        got = brain.match(brain.build_index(self.vault), ["app_platform/api/main.py"], 12)
         self.assertIn("inv-d", [l.slug for l, _ in got])
 
     def test_limit(self):
-        self.assertEqual(len(brain.match(brain.build_index(self.vault), ["inkhub_platform/api/main.py"], 2)), 2)
+        self.assertEqual(len(brain.match(brain.build_index(self.vault), ["app_platform/api/main.py"], 2)), 2)
 
 
 class Ground(VaultCase):
     def test_ground_copies_matches_and_writes_brain_md(self):
-        n = brain.ground(self.vault, self.inputs, ["inkhub_platform/api/main.py"], 12)
+        n = brain.ground(self.vault, self.inputs, ["app_platform/api/main.py"], 12)
         self.assertEqual(n, 4)
         self.assertTrue((self.inputs / "brain" / "gotchas" / "gotcha-a.md").exists())
-        self.assertIn("`gotchas/gotcha-a` gotcha, as_of 2026-09-01, current: names inkhub_platform/api/main.py",
+        self.assertIn("`gotchas/gotcha-a` gotcha, as_of 2026-09-01, current: names app_platform/api/main.py",
                       (self.inputs / "brain.md").read_text())
 
     def test_ground_without_match_or_vault_writes_nothing(self):
@@ -117,7 +118,7 @@ class Ground(VaultCase):
         import review
         with mock.patch.object(review, "BRAIN_DIR", self.vault):
             self.assertEqual(review.brain_note(self.inputs), ("", []))
-            brain.ground(self.vault, self.inputs, ["inkhub_platform/api/main.py"], 12)
+            brain.ground(self.vault, self.inputs, ["app_platform/api/main.py"], 12)
             text, dirs = review.brain_note(self.inputs)
         text = " ".join(text.split())
         self.assertIn("do not argue it again", text)
@@ -224,15 +225,15 @@ class RepoCase(VaultCase):
         self.repo = self.vault.parent / "repo"
         self.repo.mkdir()
         self.git("init", "-q", "-b", "main")
-        self.base = self.commit({"inkhub_platform/api/routes.py": "a\n", "inkhub_platform/api/other.py": "o\n"},
+        self.base = self.commit({"app_platform/api/routes.py": "a\n", "app_platform/api/other.py": "o\n"},
                                 "base", "2026-01-02T10:00:00Z")
         self.head_tests_only = self.commit({"tests/test_x.py": "t\n", "README.md": "r\n"},
                                            "tests (#7)", "2026-03-01T10:00:00Z")
-        self.head_touching_named = self.commit({"inkhub_platform/api/routes.py": "b\n"},
+        self.head_touching_named = self.commit({"app_platform/api/routes.py": "b\n"},
                                                "routes (#8)", "2026-05-01T10:00:00Z")
         self.git("update-ref", f"refs/remotes/origin/{review.BASE_BRANCH}", self.head_touching_named)
         self.git("checkout", "-q", "-b", "renamed", self.base)
-        self.git("mv", "inkhub_platform/api/routes.py", "inkhub_platform/api/routes2.py")
+        self.git("mv", "app_platform/api/routes.py", "app_platform/api/routes2.py")
         self.git("commit", "-qm", "rename", date="2026-02-01T10:00:00Z")
         self.head_renamed = self.git("rev-parse", "HEAD")
         mock.patch.object(review, "REPO_DIR", self.repo).start()
@@ -268,18 +269,18 @@ class Scan(RepoCase):
         brain_run.scan(self.store, self.index, self.head_touching_named)
         self.store.brain_upsert("ref-b", touched_at="2026-01-01T00:00:00Z")
         self.git("checkout", "-q", "main")
-        later =self.commit({"inkhub_platform/api/other.py": "o2\n"}, "other (#9)", "2026-06-01T10:00:00Z")
+        later =self.commit({"app_platform/api/other.py": "o2\n"}, "other (#9)", "2026-06-01T10:00:00Z")
         brain_run.scan(self.store, self.index, later, prev_head=self.head_touching_named)
         self.assertEqual(self.store_row("ref-b")["touched_at"], "2026-01-01T00:00:00Z")
-        again = self.commit({"inkhub_platform/api/routes.py": "c\n"}, "routes again (#10)", "2026-06-02T10:00:00Z")
+        again = self.commit({"app_platform/api/routes.py": "c\n"}, "routes again (#10)", "2026-06-02T10:00:00Z")
         brain_run.scan(self.store, self.index, again, prev_head=later)
         self.assertNotEqual(self.store_row("ref-b")["touched_at"], "2026-01-01T00:00:00Z")
 
     def test_rename_or_delete_of_named_file_counts(self):
-        self.assertEqual(brain_run.changed_named_files(self.base, self.head_renamed, ["inkhub_platform/api/routes.py"]),
-                         ["inkhub_platform/api/routes.py"])
+        self.assertEqual(brain_run.changed_named_files(self.base, self.head_renamed, ["app_platform/api/routes.py"]),
+                         ["app_platform/api/routes.py"])
         self.assertEqual(brain_run.changed_named_files(self.base, self.head_tests_only,
-                                                       ["inkhub_platform/api/routes.py"]), [])
+                                                       ["app_platform/api/routes.py"]), [])
 
     def test_unknown_sync_sha_reanchors_from_as_of(self):
         self.store.brain_upsert("ref-b", sync_sha="0" * 40, state="ok")
@@ -304,8 +305,8 @@ class Scan(RepoCase):
 class Group(VaultCase):
     def setUp(self):
         super().setUp()
-        for slug, path in (("ref-old", "inkhub_ai/a.py"), ("ref-same-package", "inkhub_ai/b/c.py"),
-                           ("ref-recent", "inkhub_ai/d.py"), ("ref-other", "inkhub_crawling/e.py")):
+        for slug, path in (("ref-old", "app_ai/a.py"), ("ref-same-package", "app_ai/b/c.py"),
+                           ("ref-recent", "app_ai/d.py"), ("ref-other", "app_crawling/e.py")):
             (self.vault / "reference" / f"{slug}.md").write_text(leaf_text("reference", "2026-04-20", "current", path))
         self.index = brain.build_index(self.vault)
         self.now = datetime.datetime(2026, 10, 28, 12, 0, tzinfo=datetime.timezone.utc)
@@ -323,7 +324,7 @@ class Group(VaultCase):
         rows = []
         for i in range(9):
             (self.vault / "reference" / f"many-{i}.md").write_text(leaf_text("reference", "2026-04-20", "current",
-                                                                             f"inkhub_ai/m{i}.py"))
+                                                                             f"app_ai/m{i}.py"))
             rows.append({"slug": f"many-{i}", "state": "due", "touched_at": "2026-10-28T08:00:00Z", "next_try_at": ""})
         self.assertEqual(len(brain.pick_group(rows, brain.build_index(self.vault), self.now, 60)), 6)
 
@@ -432,15 +433,15 @@ class Backfill(RepoCase):
         import review
         mock.patch.object(review, "WORK", self.vault.parent / "work").start()
         self.git("checkout", "-q", "main")
-        files = {"inkhub_ai/x.py": "1\n", "inkhub_crawling/y.py": "1\n", "inkhub_processing/z.py": "1\n"}
+        files = {"app_ai/x.py": "1\n", "app_crawling/y.py": "1\n", "app_processing/z.py": "1\n"}
         self.commit(files, "packages", "2026-05-01T12:00:00Z")  # dates stay monotone along history
         self.head = self.commit({k: "2\n" for k in files}, "change packages (#20)", "2026-05-02T10:00:00Z")
         self.git("update-ref", f"refs/remotes/origin/{review.BASE_BRANCH}", self.head)
-        for slug, as_of, body in (("ref-ai", "2026-04-20", "inkhub_ai/x.py"),
-                                  ("ref-crawl", "2026-04-20", "inkhub_crawling/y.py"),
-                                  ("ref-proc", "2026-04-20", "inkhub_processing/z.py"),
-                                  ("ref-same", "2026-04-20", "inkhub_platform/api/other.py"),
-                                  ("ref-undated", "undated", "inkhub_platform/api/routes.py"),
+        for slug, as_of, body in (("ref-ai", "2026-04-20", "app_ai/x.py"),
+                                  ("ref-crawl", "2026-04-20", "app_crawling/y.py"),
+                                  ("ref-proc", "2026-04-20", "app_processing/z.py"),
+                                  ("ref-same", "2026-04-20", "app_platform/api/other.py"),
+                                  ("ref-undated", "undated", "app_platform/api/routes.py"),
                                   ("ref-nopath", "2026-04-20", "no code named here")):
             (self.vault / "reference" / f"{slug}.md").write_text(leaf_text("reference", as_of, "current", body))
 
