@@ -16,6 +16,9 @@ BRAIN_MODEL = os.environ.get("PRWATCH_BRAIN_MODEL", "sonnet")
 BRAIN_MAX_RUN_USD = float(os.environ.get("PRWATCH_BRAIN_MAX_RUN_USD", "2") or 0)
 DIFF_MAX_LINES = 3000
 RETRY_MIN = (30, 90)  # after the 3rd failed call the leaves are stuck
+# "propose" (default): a drifted leaf gets status stale and its proposed edits go to the refresh log for a
+# session to apply; "apply": code applies the edits in place (with backup and undo).
+BRAIN_APPLY = os.environ.get("PRWATCH_BRAIN_APPLY", "propose").strip()
 
 SCHEMA = {
     "type": "object",
@@ -242,7 +245,7 @@ def refresh(store, vault, group, head, kind="brain_refresh", verify=False):
 def _apply_result(store, vault, group, head, result, mtimes, prs, kind):
     now = stamp()
     by_slug = {l.slug: l for l in group}
-    done = {"edited": 0, "unchanged": 0, "skipped": 0, "stuck": 0}
+    done = {"edited": 0, "flagged": 0, "unchanged": 0, "skipped": 0, "stuck": 0}
     for r in result["leaves"]:
         leaf = by_slug.get(r["slug"])
         if leaf is None:
@@ -252,9 +255,15 @@ def _apply_result(store, vault, group, head, result, mtimes, prs, kind):
             done["unchanged"] += 1
             continue
         outcome, detail = brain.apply(leaf, r["edits"], mtimes[leaf.slug], prs, head,
-                                      review.HERE / "brain-backups", now[:10])
+                                      review.HERE / "brain-backups", now[:10],
+                                      mode="apply" if BRAIN_APPLY == "apply" else "stale")
         done[outcome] += 1
-        if outcome == "edited":
+        if outcome == "flagged":
+            store.brain_upsert(leaf.slug, sync_sha=head, synced_at=now, state="ok", tries=0, last_error="")
+            brain.log(vault, f"{now} [[{leaf.slug}]] proposed ({len(r['edits'])} edits, leaf flagged stale) from "
+                             f"{', '.join(f'#{p}' for p in prs) or 'master'} at {head[:7]} ({kind}): "
+                             f"{brain.plain(r.get('why', ''))}\n{brain.diff_block(r['edits'])}")
+        elif outcome == "edited":
             store.brain_upsert(leaf.slug, sync_sha=head, synced_at=now, state="ok", tries=0, last_error="")
             brain.log(vault, f"{now} [[{leaf.slug}]] edited ({len(r['edits'])} edits) from "
                              f"{', '.join(f'#{p}' for p in prs) or 'master'} at {head[:7]} ({kind}): "

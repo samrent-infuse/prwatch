@@ -151,14 +151,17 @@ SHRINK_LIMIT = 0.6  # an edited leaf keeps at least 60% of its length
 LOG_LEAF = Path("handoff") / "brain-refresh-log.md"
 
 
-def _set_frontmatter(text, as_of, suffix):
-    """`as_of` replaced and `suffix` appended to `source` (added when missing), in the frontmatter only."""
+def _set_frontmatter(text, as_of, suffix, status=None):
+    """`as_of` replaced (unless None), `status` replaced (when given) and `suffix` appended to `source`
+    (added when missing), in the frontmatter only."""
     head, sep, rest = text.partition("\n---\n")
     lines = head.split("\n")
     out, has_source = [], False
     for line in lines:
-        if line.startswith("as_of:"):
+        if line.startswith("as_of:") and as_of:
             line = f"as_of: {as_of}"
+        elif line.startswith("status:") and status:
+            line = f"status: {status}"
         elif line.startswith("source:"):
             has_source = True
             v = line[len("source:"):].strip()
@@ -169,11 +172,14 @@ def _set_frontmatter(text, as_of, suffix):
     return "\n".join(out) + sep + rest
 
 
-def apply(leaf, edits, read_mtime, prs, sha, backups, today):
-    """Apply a refresh's edits to one leaf. ("edited" | "skipped" | "stuck", why). Skipped: the file changed
-    since it was read (left due). Stuck: an edit does not match exactly once, or a guard fails (frontmatter
-    lost its type or title, or the leaf shrank past SHRINK_LIMIT). The previous version is backed up first;
-    the write is atomic and keeps the file's line endings."""
+def apply(leaf, edits, read_mtime, prs, sha, backups, today, mode="apply"):
+    """Apply a refresh's edits to one leaf. ("edited" | "flagged" | "skipped" | "stuck", why). mode "stale"
+    applies no edit: it sets `status: stale` and notes the proposal, leaving as_of and the body alone.
+    Skipped: the file changed since it was read (left due). Stuck: an edit does not match exactly once, or
+    a guard fails (frontmatter lost its type or title, or the leaf shrank past SHRINK_LIMIT). The previous
+    version is backed up first; the write is atomic and keeps the file's line endings."""
+    if mode == "stale":
+        edits = []
     path = Path(leaf.path)
     if path.stat().st_mtime != read_mtime:
         return "skipped", "changed on disk since it was read"
@@ -188,7 +194,11 @@ def apply(leaf, edits, read_mtime, prs, sha, backups, today):
         text = text.replace(old, new)
     prs_text = (", ".join(f"#{p}" for p in prs[:3]) + (f" and {len(prs) - 3} more" if len(prs) > 3 else "")
                 or "master")  # the full list is in the refresh log
-    text = _set_frontmatter(text, today, f"; refreshed from {prs_text} at {sha[:7]} by prwatch")
+    if mode == "stale":
+        text = _set_frontmatter(text, None, f"; flagged stale from {prs_text} at {sha[:7]} by prwatch, proposed edits "
+                                            "in brain-refresh-log", status="stale")
+    else:
+        text = _set_frontmatter(text, today, f"; refreshed from {prs_text} at {sha[:7]} by prwatch")
     fm_old, fm_new = parse_frontmatter(old_text), parse_frontmatter(text)
     if not fm_new.get("title") or fm_new.get("type") != fm_old.get("type"):
         return "stuck", "frontmatter lost its type or title"
@@ -200,7 +210,18 @@ def apply(leaf, edits, read_mtime, prs, sha, backups, today):
     tmp = path.with_suffix(".md.prwatch-tmp")
     tmp.write_bytes((text.replace("\n", "\r\n") if crlf else text).encode("utf-8"))
     os.replace(tmp, path)
+    if mode == "stale":
+        return "flagged", f"status stale, backup {backup}"
     return "edited", f"{len(edits)} edits, backup {backup}"
+
+
+def diff_block(edits):
+    """The proposed edits as an indented ```diff block for a log entry (old lines -, new lines +)."""
+    out = ["  ```diff"]
+    for e in edits:
+        out += [f"  - {l}" for l in e["old"].replace("\r\n", "\n").strip("\n").split("\n")]
+        out += [f"  + {l}" for l in e["new"].replace("\r\n", "\n").strip("\n").split("\n")]
+    return "\n".join(out + ["  ```"])
 
 
 def log(vault, line):
@@ -230,7 +251,8 @@ def log_counts(vault, day):
     p = Path(vault) / LOG_LEAF
     lines = p.read_text(encoding="utf-8").splitlines() if p.exists() else []
     today = [l for l in lines if l.startswith(f"- {day}")]
-    return {"edited": sum("]] edited (" in l for l in today), "suggestions": sum(" suggestion (" in l for l in today)}
+    return {"edited": sum("]] edited (" in l for l in today), "proposed": sum("]] proposed (" in l for l in today),
+            "suggestions": sum(" suggestion (" in l for l in today)}
 
 
 def undo(vault, backups, folder_slug, date=None):

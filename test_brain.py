@@ -33,6 +33,10 @@ def leaf_text(type_, as_of, status, body, title="T"):
             + "More context that keeps the leaf a realistic size. " * 5 + "\n")
 
 
+def stamp_today():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+
+
 class VaultCase(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -143,6 +147,17 @@ class Apply(VaultCase):
         brain.apply(self.leaf, [{"old": "port 5432", "new": "port 6432"}], self.mtime, list(range(1, 36)),
                     "abcdef1234", self.backups, "2026-10-28")
         self.assertIn("; refreshed from #1, #2, #3 and 32 more at abcdef1 by prwatch", self.leaf.path.read_text())
+
+    def test_flag_stale_changes_only_status_and_source(self):
+        before = self.leaf.path.read_text()
+        out = brain.apply(self.leaf, [], self.mtime, [1401], "abcdef1234", self.backups, "2026-10-28", mode="stale")
+        self.assertEqual(out[0], "flagged")
+        text = self.leaf.path.read_text()
+        self.assertIn("status: stale", text)
+        self.assertIn("as_of: 2026-04-20", text)  # content not refreshed: as_of stays
+        self.assertIn("; flagged stale from #1401 at abcdef1 by prwatch, proposed edits in brain-refresh-log", text)
+        self.assertEqual(text.split("---", 2)[2], before.split("---", 2)[2])
+        self.assertTrue((self.backups / "2026-10-28" / "reference" / "ref-b.md").exists())
 
     def test_crlf_leaf_stays_crlf(self):
         self.leaf.path.write_bytes(self.leaf.path.read_bytes().replace(b"\n", b"\r\n"))
@@ -339,7 +354,22 @@ class Refresh(RepoCase):
         self.assertIsNotNone(brain_run.validate({"leaves": [{"slug": "x", "verdict": "unchanged", "edits": [],
                                                              "why": ""}], "suggestions": []})[0])
 
+    def test_propose_mode_flags_stale_and_logs_the_edits_as_a_diff(self):
+        before_body = self.leaf.path.read_text().split("---", 2)[2]
+        with mock.patch.object(brain_run, "_claude", return_value=(json.dumps(OK_OUTPUT), 0)):
+            out = brain_run.refresh(self.store, self.vault, [self.leaf], self.head_touching_named)
+        self.assertIn("1 flagged", out)
+        text = self.leaf.path.read_text()
+        self.assertIn("status: stale", text)
+        self.assertEqual(text.split("---", 2)[2], before_body)
+        log = (self.vault / "handoff" / "brain-refresh-log.md").read_text()
+        self.assertIn("[[ref-b]] proposed (1 edits, leaf flagged stale)", log)
+        self.assertIn("  ```diff\n  - port 5432\n  + port 6432\n  ```", log)
+        self.assertEqual(self.store_row("ref-b")["sync_sha"], self.head_touching_named)
+        self.assertEqual(brain.log_counts(self.vault, stamp_today())["proposed"], 1)
+
     def test_refresh_applies_edits_logs_and_records_spend(self):
+        mock.patch.object(brain_run, "BRAIN_APPLY", "apply").start()
         with mock.patch.object(brain_run, "_claude", return_value=(json.dumps(OK_OUTPUT), 0)) as c:
             brain_run.refresh(self.store, self.vault, [self.leaf], self.head_touching_named)
         prompt = c.call_args.args[0]
@@ -497,7 +527,7 @@ class Step(VaultCase):
         brain.log(self.vault, "2026-10-28T10:00:00Z [[a]] edited (1 edits) from #1")
         brain.log(self.vault, "2026-10-28T10:00:00Z suggestion (new_leaf) [[b]]: x")
         brain.log(self.vault, "2026-10-27T10:00:00Z [[c]] edited (1 edits) from #2")
-        self.assertEqual(brain.log_counts(self.vault, "2026-10-28"), {"edited": 1, "suggestions": 1})
+        self.assertEqual(brain.log_counts(self.vault, "2026-10-28"), {"edited": 1, "proposed": 0, "suggestions": 1})
 
 
 if __name__ == "__main__":
