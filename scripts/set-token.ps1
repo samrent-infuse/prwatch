@@ -2,7 +2,7 @@
 #   1. In any terminal: claude setup-token. It opens a browser sign-in. The page then shows a CODE
 #      (it contains '#'): paste that code back into the same terminal. The terminal then prints the
 #      TOKEN (sk-ant-oat01-...). That token is what this script wants.
-#   2. Here: powershell -ExecutionPolicy Bypass -File $HOME\.claude\inkhub\prwatch\set-token.ps1
+#   2. From the prwatch folder: powershell -ExecutionPolicy Bypass -File scripts\set-token.ps1
 # The token is read hidden, tried with one tiny Haiku call in the prwatch image, and written to
 # claude.env only if that call works. It is never echoed or put on a command line.
 $ErrorActionPreference = "Stop"
@@ -18,14 +18,15 @@ try {
     $ok = $LASTEXITCODE -eq 0
 } finally { Remove-Item Env:CLAUDE_CODE_OAUTH_TOKEN }
 if (-not $ok) { throw "Claude refused this token, nothing written: $($out.Trim())" }
-$envFile = Join-Path $PSScriptRoot "claude.env"
+$root = Split-Path $PSScriptRoot -Parent  # the prwatch folder
+$envFile = Join-Path $root "claude.env"
 [IO.File]::WriteAllText($envFile, "CLAUDE_CODE_OAUTH_TOKEN=$token`n", (New-Object Text.UTF8Encoding $false))
 Remove-Variable token, secure
 Write-Host "Token works; saved $envFile"
-$ghUser = (Select-String -Path (Join-Path $PSScriptRoot "prwatch.env") -Pattern '^PRWATCH_GH_USER=(\S+)' |
+$ghUser = (Select-String -Path (Join-Path $root "prwatch.env") -Pattern '^PRWATCH_GH_USER=(\S+)' |
            Select-Object -First 1).Matches.Groups[1].Value
 $env:GH_TOKEN = if ($ghUser) { gh auth token -u $ghUser } else { gh auth token }
-Push-Location $PSScriptRoot
+Push-Location $root
 try { docker compose up -d --force-recreate } finally { Pop-Location; Remove-Item Env:GH_TOKEN }
 Start-Sleep 20
 docker logs --tail 1 prwatch-prwatch-1

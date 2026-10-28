@@ -5,7 +5,7 @@ import os
 import re
 import subprocess
 
-from decide import ME, Snapshot
+from prwatch.decide import ME, Snapshot
 
 OWNER, NAME = os.environ.get("PRWATCH_REPO", "example-org/example-repo").split("/", 1)
 REPO = f"{OWNER}/{NAME}"

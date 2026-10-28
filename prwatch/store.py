@@ -3,7 +3,7 @@
 import datetime
 import sqlite3
 
-from decide import Row
+from prwatch.decide import Row
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS prs (

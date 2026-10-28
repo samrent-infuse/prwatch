@@ -15,9 +15,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import brain
-import brain_run
-
+from prwatch import brain
+from prwatch import brain_run
 LEAVES = {
     "gotchas/gotcha-a.md": ("gotcha", "2026-09-01", "current", "Boot DDL in `app_platform/api/main.py` locks."),
     "reference/ref-b.md": ("reference", "2026-04-20", "current",
@@ -115,7 +114,7 @@ class Ground(VaultCase):
         self.assertFalse((self.inputs / "brain.md").exists())
 
     def test_prompt_gets_the_brain_section_only_with_brain_md(self):
-        import review
+        from prwatch import review
         with mock.patch.object(review, "BRAIN_DIR", self.vault):
             self.assertEqual(review.brain_note(self.inputs), ("", []))
             brain.ground(self.vault, self.inputs, ["app_platform/api/main.py"], 12)
@@ -220,8 +219,8 @@ class RepoCase(VaultCase):
 
     def setUp(self):
         super().setUp()
-        import review
-        import store
+        from prwatch import review
+        from prwatch import store
         self.repo = self.vault.parent / "repo"
         self.repo.mkdir()
         self.git("init", "-q", "-b", "main")
@@ -294,7 +293,7 @@ class Scan(RepoCase):
         self.assertEqual(brain_run.anchor("undated"), "")
 
     def test_master_head_comes_from_the_tick_query(self):
-        import fetch
+        from prwatch import fetch
         data = {"data": {"repository": {"defaultBranchRef": {"target": {"oid": "abc"}},
                                         "pullRequests": {"nodes": []}}}}
         with mock.patch.object(fetch, "gh", return_value=json.dumps(data)):
@@ -341,7 +340,7 @@ OK_OUTPUT = {"type": "result", "subtype": "success", "is_error": False, "total_c
 class Refresh(RepoCase):
     def setUp(self):
         super().setUp()
-        import review
+        from prwatch import review
         mock.patch.object(review, "WORK", self.vault.parent / "work").start()
         mock.patch.object(review, "HERE", self.vault.parent / "here").start()
         self.store.brain_upsert("ref-b", path="reference/ref-b.md", sync_sha=self.base, state="due",
@@ -430,7 +429,7 @@ class Refresh(RepoCase):
 class Backfill(RepoCase):
     def setUp(self):
         super().setUp()
-        import review
+        from prwatch import review
         mock.patch.object(review, "WORK", self.vault.parent / "work").start()
         self.git("checkout", "-q", "main")
         files = {"app_ai/x.py": "1\n", "app_crawling/y.py": "1\n", "app_processing/z.py": "1\n"}
@@ -480,11 +479,11 @@ class Backfill(RepoCase):
 class Step(VaultCase):
     def setUp(self):
         super().setUp()
-        import act
-        import fetch
-        import main
-        import review
-        import store
+        from prwatch import act
+        from prwatch import fetch
+        from prwatch import main
+        from prwatch import review
+        from prwatch import store
         self.main = main
         self.store = store.Store(str(self.vault.parent / "s.db"))
         self.addCleanup(self.store.db.close)
@@ -521,7 +520,7 @@ class Step(VaultCase):
         self.assertEqual(r.call_args.args[2:4], (["leaf"], "h2"))
 
     def test_undo_command_restores_marks_stuck_and_logs(self):
-        import review
+        from prwatch import review
         leaf = {l.slug: l for l in brain.build_index(self.vault)}["ref-b"]
         brain.apply(leaf, [{"old": "port 5432", "new": "port 6432"}], leaf.path.stat().st_mtime, [1], "a" * 40,
                     self.vault.parent / "here" / "brain-backups", "2026-10-28")

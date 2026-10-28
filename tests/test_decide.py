@@ -8,8 +8,7 @@ os.environ.update(PRWATCH_ME="me,me-alt", PRWATCH_REVIEWER="reviewer-bot",
 
 import unittest
 
-import decide as d
-
+from prwatch import decide as d
 GREEN = [
     {"name": "quality-gate / Code quality, dependencies and secrets", "status": "COMPLETED", "conclusion": "SUCCESS"},
     {"name": "quality-gate", "status": "COMPLETED", "conclusion": "SKIPPED"},

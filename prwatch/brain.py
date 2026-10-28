@@ -236,7 +236,7 @@ def log(vault, line):
         p.write_text(f'---\ntype: handoff\ntitle: "prwatch brain refresh log"\nstatus: active\nas_of: {today}\n'
                      "source: \"written by prwatch, one line per reference leaf it refreshed or suggestion it made\"\n"
                      "tags: [brain, automation]\nlinks: [2026-10-28-prwatch-brain-grounding-and-refresh-design]\n---\n\n"
-                     "# prwatch brain refresh log\n\nBackups for undo: `python3 main.py --brain-undo <folder/slug>`.\n\n",
+                     "# prwatch brain refresh log\n\nBackups for undo: `python3 -m prwatch.main --brain-undo <folder/slug>`.\n\n",
                      encoding="utf-8")
         manifest = vault / "handoff" / "MANIFEST.md"
         if manifest.exists():

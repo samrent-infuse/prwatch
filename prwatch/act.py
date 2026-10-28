@@ -10,27 +10,21 @@ import os
 import subprocess
 from pathlib import Path
 
-import claude_auth
-import post
-import review
-from decide import REVIEWER
-from fetch import REPO, gh
+from prwatch import prompts
+from prwatch import claude_auth
+from prwatch import post
+from prwatch import review
+from prwatch.decide import REVIEWER
+from prwatch.fetch import REPO, gh
 
 INKHUB = Path(os.environ.get("INKHUB_DIR", "/inkhub"))
-OUT = INKHUB / "prwatch"
+ROOT = INKHUB / "prwatch"   # this folder: the files a user edits (pins.txt, project-context.md)
+OUT = ROOT / "state"         # everything prwatch writes: logs, status.json, runs/, drafts/, brain-backups/
 DRAFTS = OUT / "drafts"
 REVIEWS = INKHUB / "reviews"
 STOP = INKHUB / "STOP"
 
-FIX_PROMPT = """You are preparing fixes on pull request #{n} of {repo}, checked out at {head} in the current
-directory. A reviewer requested changes. Address each requested change below with minimal, focused edits
-that follow the surrounding code. Do not touch unrelated code. If a request is unclear or you disagree,
-leave the code as is and say why. Finish with a short list: each request, and what you changed or why not.
---- review by {author} ---
-{body}
---- inline comments ---
-{comments}
-"""
+FIX_PROMPT = prompts.load("fix-draft")
 
 
 def claude_ready():

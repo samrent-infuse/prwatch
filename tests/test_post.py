@@ -13,13 +13,13 @@ from pathlib import Path
 import unittest
 from unittest import mock
 
-import decide
-import fetch
-import main
-import post
-import render
-import review
-from store import Store
+from prwatch import decide
+from prwatch import fetch
+from prwatch import main
+from prwatch import post
+from prwatch import render
+from prwatch import review
+from prwatch.store import Store
 
 V_OK = {"verdict": "approve", "summary": "Looks right — small change.", "findings": [
     {"severity": "minor", "file": "a.py", "line": 3, "title": "naming", "detail": "x – y"}]}

@@ -15,3 +15,5 @@ project-context.md
 __pycache__/
 brain-backups/
 no-brain/
+# everything prwatch writes at run time
+state/

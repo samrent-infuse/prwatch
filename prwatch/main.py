@@ -1,7 +1,7 @@
 """PR watcher loop: one GraphQL read per tick, rules in decide.py, model calls behind CI and caps.
 
-  python main.py            # loop every PRWATCH_INTERVAL seconds (default 180)
-  python main.py --once     # one tick
+  python3 -m prwatch.main          # loop every PRWATCH_INTERVAL seconds (default 180)
+  python3 -m prwatch.main --once   # one tick
   PRWATCH_DRY_RUN=1 ...     # decide and log, change nothing, call no model
 
 A review is a job keyed review:<pr>:<head>. The model runs once and its verdict is stored; posting
@@ -20,15 +20,15 @@ import sys
 import time
 import traceback
 
-import act
-import brain
-import brain_run
-import decide as d
-import fetch
-import post
-import render
-import review
-from store import Store, due, later, stamp
+from prwatch import act
+from prwatch import brain
+from prwatch import brain_run
+from prwatch import decide as d
+from prwatch import fetch
+from prwatch import post
+from prwatch import render
+from prwatch import review
+from prwatch.store import Store, due, later, stamp
 
 DAILY_CAP = int(os.environ.get("PRWATCH_DAILY_CAP", "6"))
 PER_PR_CAP = int(os.environ.get("PRWATCH_PER_PR_CAP", "2"))
@@ -47,7 +47,7 @@ LOG = act.OUT / "prwatch.log"
 NOTIFY = act.OUT / "notifications.log"
 BEAT = act.OUT / "heartbeat.txt"
 STATUS = act.OUT / "status.json"
-PINS = act.OUT / "pins.txt"
+PINS = act.ROOT / "pins.txt"
 
 
 def log(msg, notify=False):
@@ -322,7 +322,7 @@ def write_status(store, me, state):
 
 def brain_undo(store, folder_slug, date):
     """Put a leaf's backup back and stop automatic refreshes of it (state stuck) until a person looks."""
-    used = brain.undo(review.BRAIN_DIR, review.HERE / "brain-backups", folder_slug, date)
+    used = brain.undo(review.BRAIN_DIR, review.STATE / "brain-backups", folder_slug, date)
     slug = folder_slug.split("/", 1)[1]
     store.brain_upsert(slug, path=f"{folder_slug}.md", state="stuck", last_error=f"undone by hand from {used}")
     brain.log(review.BRAIN_DIR, f"{stamp()} [[{slug}]] undone by hand: restored {used}; automatic refresh off for it")
@@ -357,7 +357,7 @@ def main():
     ap.add_argument("--brain-undo", metavar="FOLDER/SLUG", help="restore a refreshed leaf's backup")
     ap.add_argument("--date", help="with --brain-undo: the backup day, YYYY-MM-DD (default newest)")
     args = ap.parse_args()
-    act.OUT.mkdir(parents=True, exist_ok=True)
+    act.OUT.mkdir(parents=True, exist_ok=True)  # state/
     store = Store(DB)
     brain.log_event = lambda msg: log(f"brain: {msg}")
     if args.brain_backfill or args.brain_undo:

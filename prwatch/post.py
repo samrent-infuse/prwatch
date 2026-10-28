@@ -10,10 +10,10 @@ import re
 import subprocess
 import tempfile
 
-import render
-import decide
-from decide import ME
-from fetch import REPO, AuthBroken, check_list, gh
+from prwatch import render
+from prwatch import decide
+from prwatch.decide import ME
+from prwatch.fetch import REPO, AuthBroken, check_list, gh
 
 POST_BACKOFF_MIN = (2, 10, 30, 60)
 

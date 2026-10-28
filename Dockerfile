@@ -11,5 +11,8 @@ USER node
 ENV HOME=/home/node PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 
 WORKDIR /app
-COPY --chown=node:node *.py entrypoint.sh ./
+COPY --chown=node:node entrypoint.sh ./
+COPY --chown=node:node prompts/ ./prompts/
+COPY --chown=node:node prwatch/ ./prwatch/
+COPY --chown=node:node tests/ ./tests/
 ENTRYPOINT ["sh", "/app/entrypoint.sh"]

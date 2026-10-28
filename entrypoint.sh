@@ -8,4 +8,4 @@ if [ ! -d /repo/.git ]; then
 fi
 # Claude Code's first-run onboarding would block `claude -p`; mark it done in the container's own home.
 [ -f "$HOME/.claude.json" ] || echo '{"hasCompletedOnboarding": true}' > "$HOME/.claude.json"
-exec python3 -u /app/main.py "$@"
+cd /app && exec python3 -u -m prwatch.main "$@"
