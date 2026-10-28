@@ -14,3 +14,4 @@ project-context.md
 *.tmp
 __pycache__/
 brain-backups/
+no-brain/

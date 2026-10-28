@@ -32,7 +32,10 @@ re-request of my review still gets one.
 1. Code prepares a worktree at the head and an inputs folder: `input.diff`, `pr.md`, `project-context.md`
    (copied from this folder: what a reviewer must know about the repository), and on a re-review
    `previous.md` (the local review file, else my last review on that head from GitHub) and
-   `conversation.md` (what people wrote on the PR since then, bots left out). `input.diff` is
+   `conversation.md` (what people wrote on the PR since then, bots left out). With a project brain mounted
+   (`PRWATCH_BRAIN_DIR`), `brain.md` lists up to `PRWATCH_BRAIN_MAX_LEAVES` vault leaves naming a changed file,
+   its directory or its package (gotchas, decisions, rejected, reference; investigations on an exact file),
+   copied under `brain/`; the run may read the rest of the vault. `input.diff` is
    last-reviewed-head..HEAD for plain new commits, and the whole PR from its merge-base when the base moved.
 2. claude runs `--restricted --tools Read,Grep,Glob,Agent` with the same `--allowedTools`
    (`dontAsk` denies anything not pre-approved), and an environment of only the Claude token, HOME and

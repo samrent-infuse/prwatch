@@ -87,5 +87,30 @@ class Index(VaultCase):
         self.assertEqual(len(brain.match(brain.build_index(self.vault), ["inkhub_platform/api/main.py"], 2)), 2)
 
 
+class Ground(VaultCase):
+    def test_ground_copies_matches_and_writes_brain_md(self):
+        n = brain.ground(self.vault, self.inputs, ["inkhub_platform/api/main.py"], 12)
+        self.assertEqual(n, 4)
+        self.assertTrue((self.inputs / "brain" / "gotchas" / "gotcha-a.md").exists())
+        self.assertIn("`gotchas/gotcha-a` gotcha, as_of 2026-09-01, current: names inkhub_platform/api/main.py",
+                      (self.inputs / "brain.md").read_text())
+
+    def test_ground_without_match_or_vault_writes_nothing(self):
+        self.assertEqual(brain.ground(self.vault, self.inputs, ["README.md"], 12), 0)
+        self.assertEqual(brain.ground(Path("/nonexistent"), self.inputs, ["x.py"], 12), 0)
+        self.assertFalse((self.inputs / "brain.md").exists())
+
+    def test_prompt_gets_the_brain_section_only_with_brain_md(self):
+        import review
+        with mock.patch.object(review, "BRAIN_DIR", self.vault):
+            self.assertEqual(review.brain_note(self.inputs), ("", []))
+            brain.ground(self.vault, self.inputs, ["inkhub_platform/api/main.py"], 12)
+            text, dirs = review.brain_note(self.inputs)
+        text = " ".join(text.split())
+        self.assertIn("do not argue it again", text)
+        self.assertIn("can be stale", text)
+        self.assertEqual(dirs, ["--add-dir", str(self.vault)])
+
+
 if __name__ == "__main__":
     unittest.main()

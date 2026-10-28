@@ -122,3 +122,25 @@ def match(index, changed, limit):
     scored.sort(key=lambda x: x[0].as_of, reverse=True)  # newer as_of first; the next sort is stable
     scored.sort(key=lambda x: (-x[1], order.get(x[0].type, len(order))))
     return [(l, why) for l, _, why in scored[:limit]]
+
+
+def ground(vault, inputs, changed, limit, cache=None):
+    """Copy the leaves that match the changed files into inputs/brain/<folder>/ and list them in
+    inputs/brain.md. Returns how many; 0 (and nothing written) without a vault or a match."""
+    vault = Path(vault)
+    if not vault.is_dir():
+        return 0
+    picked = match(build_index(vault, cache), changed, limit)
+    if not picked:
+        return 0
+    lines = []
+    for leaf, why in picked:
+        dest = Path(inputs) / "brain" / leaf.folder / leaf.path.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(leaf.path, dest)
+        lines.append(f"- `{leaf.folder}/{leaf.slug}` {leaf.type}, as_of {leaf.as_of or 'undated'}, "
+                     f"{leaf.status or 'no status'}: {why}")
+    (Path(inputs) / "brain.md").write_text(
+        "Vault leaves about the files this PR changes (copies under brain/; the vault itself is readable too).\n\n"
+        + "\n".join(lines) + "\n", encoding="utf-8")
+    return len(picked)

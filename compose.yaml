@@ -23,6 +23,8 @@ services:
       - ${USERPROFILE}/.claude/.credentials.json:/host-claude/credentials.json:ro   # desktop login; read, never refreshed here
       - state:/data                      # SQLite stays off the Windows bind mount
       - repo:/repo
+      # the project brain, read-only (PRWATCH_BRAIN_HOST in a git-ignored .env next to this file)
+      - ${PRWATCH_BRAIN_HOST:-./no-brain}:/brain:ro
 volumes:
   state:
   repo:
