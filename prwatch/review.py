@@ -113,6 +113,23 @@ def patch_lines(tip):
     return sorted(out)
 
 
+COMPARE_MAX_LINES = 60
+
+
+def compare_text(before, after):
+    """compare.txt for a re-review after the base moved: the verdict (PATCH_IDENTICAL, PATCH_SUBSET when lines
+    were only dropped, PATCH_CHANGED), the counts, and the differing lines, new ones first."""
+    old, new = set(before), set(after)
+    only_old, only_new = sorted(old - new), sorted(new - old)
+    verdict = "PATCH_IDENTICAL" if not only_old and not only_new else "PATCH_SUBSET" if not only_new else "PATCH_CHANGED"
+    lines = [verdict, f"only in the reviewed patch: {len(only_old)}, only in the new patch: {len(only_new)}"]
+    shown = [f"> {f}: {l}" for f, l in only_new] + [f"< {f}: {l}" for f, l in only_old]
+    lines += shown[:COMPARE_MAX_LINES]
+    if len(shown) > COMPARE_MAX_LINES:
+        lines.append(f"... {len(shown) - COMPARE_MAX_LINES} more lines not shown")
+    return "\n".join(lines) + "\n"
+
+
 def same_patch(n, reviewed, head):
     """True when the PR at `head` adds and removes exactly the lines it did at `reviewed` (a rebase, a merge
     from the base branch, a squash); False when anything differs; None when `reviewed` cannot be fetched.
@@ -153,6 +170,10 @@ def prepare(n, head, base_prev, prev_body):
     if rereview:
         if prev_body:
             (inputs / "previous.md").write_text(prev_body, encoding="utf-8")
+        if moved and subprocess.run(["git", "cat-file", "-e", f"{base_prev}^{{commit}}"], cwd=REPO_DIR,
+                                    capture_output=True).returncode == 0:
+            (inputs / "compare.txt").write_text(compare_text(patch_lines(base_prev), patch_lines(head)),
+                                                encoding="utf-8")
         try:
             talk = fetch.conversation_since(n, base_prev)
         except fetch.AuthBroken:

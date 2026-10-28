@@ -186,6 +186,23 @@ class RunRecords(unittest.TestCase):
         self.assertTrue(folder.name.startswith("PR-1-abc1234-"))
 
 
+class Compare(unittest.TestCase):
+    def test_compare_text_counts_and_lists_new_lines_first(self):
+        old = [("a.py", "+x = 1"), ("a.py", "+y = 2")]
+        new = [("a.py", "+x = 1"), ("a.py", "+y = 3")]
+        text = review.compare_text(old, new)
+        self.assertTrue(text.startswith("PATCH_CHANGED"))
+        self.assertIn("only in the reviewed patch: 1, only in the new patch: 1", text)
+        self.assertLess(text.index("> a.py: +y = 3"), text.index("< a.py: +y = 2"))
+        self.assertTrue(review.compare_text(old, old[:1]).startswith("PATCH_SUBSET"))
+        self.assertTrue(review.compare_text(old, old).startswith("PATCH_IDENTICAL"))
+
+    def test_rereview_prompt_has_the_cheap_paths(self):
+        text = " ".join(review.REREVIEW.split()) + " " + " ".join(review.BASE_MOVED.split())
+        self.assertIn("under about 150 changed lines", text)
+        self.assertIn("compare.txt", text)
+
+
 class GitLock(unittest.TestCase):
     def test_fetch_and_worktree_hold_the_lock_reads_do_not(self):
         seen = {}
