@@ -115,6 +115,65 @@ class Ground(VaultCase):
         self.assertEqual(dirs, ["--add-dir", str(self.vault)])
 
 
+class Apply(VaultCase):
+    def setUp(self):
+        super().setUp()
+        self.leaf = {l.slug: l for l in brain.build_index(self.vault)}["ref-b"]
+        self.mtime = self.leaf.path.stat().st_mtime
+
+    def apply(self, edits, mtime=None):
+        return brain.apply(self.leaf, edits, self.mtime if mtime is None else mtime, [1401, 1403], "abcdef1234",
+                           self.backups, "2026-10-28")
+
+    def test_edit_applies_once_updates_frontmatter_and_backs_up(self):
+        self.assertEqual(self.apply([{"old": "port 5432", "new": "port 6432"}])[0], "edited")
+        text = self.leaf.path.read_text()
+        self.assertIn("port 6432", text)
+        self.assertIn("as_of: 2026-10-28", text)
+        self.assertIn('source: "built from source; refreshed from #1401, #1403 at abcdef1 by prwatch"', text)
+        self.assertIn("port 5432", (self.backups / "2026-10-28" / "reference" / "ref-b.md").read_text())
+
+    def test_crlf_leaf_stays_crlf(self):
+        self.leaf.path.write_bytes(self.leaf.path.read_bytes().replace(b"\n", b"\r\n"))
+        out = self.apply([{"old": "port 5432", "new": "port 6432"}], self.leaf.path.stat().st_mtime)
+        self.assertEqual(out[0], "edited")
+        raw = self.leaf.path.read_bytes()
+        self.assertNotIn(b"\n", raw.replace(b"\r\n", b""))
+        self.assertIn(b"as_of: 2026-10-28\r\n", raw)
+
+    def test_ambiguous_or_missing_old_is_stuck_and_untouched(self):
+        before = self.leaf.path.read_bytes()
+        self.assertEqual(self.apply([{"old": "the", "new": "x"}])[0], "stuck")
+        self.assertEqual(self.apply([{"old": "not in the leaf", "new": "x"}])[0], "stuck")
+        self.assertEqual(self.leaf.path.read_bytes(), before)
+        self.assertFalse(self.backups.exists())
+
+    def test_shrink_over_40_percent_or_lost_title_is_stuck(self):
+        body = self.leaf.path.read_text().split("---", 2)[2]
+        self.assertEqual(self.apply([{"old": body, "new": "\nshort\n"}])[0], "stuck")
+        self.assertEqual(self.apply([{"old": 'title: "T"\n', "new": ""}])[0], "stuck")
+
+    def test_changed_on_disk_since_read_is_skipped_without_backup(self):
+        self.assertEqual(self.apply([{"old": "port 5432", "new": "x"}], self.mtime - 10)[0], "skipped")
+        self.assertFalse(self.backups.exists())
+
+    def test_log_creates_leaf_and_manifest_line_once(self):
+        brain.log(self.vault, "a")
+        brain.log(self.vault, "b")
+        self.assertEqual((self.vault / "handoff" / "MANIFEST.md").read_text().count("brain-refresh-log"), 1)
+        text = (self.vault / "handoff" / "brain-refresh-log.md").read_text()
+        self.assertTrue(text.endswith("- a\n- b\n"))
+        self.assertEqual(brain.parse_frontmatter(text)["type"], "handoff")
+
+    def test_undo_restores_newest_backup(self):
+        self.apply([{"old": "port 5432", "new": "port 6432"}])
+        restored = brain.undo(self.vault, self.backups, "reference/ref-b", None)
+        self.assertIn("port 5432", self.leaf.path.read_text())
+        self.assertEqual(restored, self.backups / "2026-10-28" / "reference" / "ref-b.md")
+        with self.assertRaises(FileNotFoundError):
+            brain.undo(self.vault, self.backups, "reference/nope", None)
+
+
 class RepoCase(VaultCase):
     """A vault plus a git repo whose commits carry dates, with review.REPO_DIR pointed at it."""
 
