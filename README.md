@@ -1,103 +1,119 @@
 # prwatch
 
-A pull request watcher that reviews with Claude Code, runs as one Docker container, and keeps GitHub
-writes in plain code. Built for one GitHub repository and one person: it reviews the PRs you are asked
-to review, re-reviews after the author pushes corrections, and drafts fixes (never pushed) for review
-feedback on your own PRs.
+Reviews pull requests with Claude Code from one Docker container. It reviews the PRs you are asked to
+review and your watched teammates' PRs, re-reviews them after corrections, requests a reviewer on your own
+ready PRs, and drafts fixes (never pushed) for change requests on them. Code makes every decision and every
+GitHub write; the model only reads and returns a JSON verdict.
 
-## What it does
-Every `PRWATCH_INTERVAL` seconds (default 180), ONE GraphQL read of all open PRs. Rules live in `decide.py` (pure, unit-tested):
+## How it runs
 
-| PR role | No model call | Model call (Opus, high) |
-|---|---|---|
-| mine (author in `PRWATCH_ME`) | request `PRWATCH_REVIEWER` once per head, when ready and CI cleared | fix draft for a new CHANGES_REQUESTED review: patch in `drafts/`, never pushed |
-| asked (review requested from me, pinned, or reviewed by me before) | docs-only push since my last review: skip; posting and retrying a stored verdict; one comment at the change-round cap | review when requested; re-review when files changed since my last review, BASE_SHA = last reviewed head |
-| other | nothing | nothing (pin it to review) |
+The container polls every `PRWATCH_INTERVAL` seconds with one GraphQL read of the open PRs. A poll that
+finds nothing costs no tokens. Each review, re-review or fix draft runs on a worker thread, up to
+`PRWATCH_MAX_PARALLEL` at once, so polling goes on while they run. A run is a fresh, lean `claude -p`: no
+settings, hooks, MCP servers, skills or CLAUDE.md from the PR's checkout, only Read, Grep, Glob and Agent, and
+no GitHub token. It follows the superpowers `requesting-code-review` skill, briefs one reviewer subagent with
+three to eight questions, checks the critical and important findings itself, and returns the verdict. Code
+then decides the event, renders the review, posts it pinned to the reviewed commit and reads it back.
 
-A first review starts as soon as my review is requested, without waiting for CI, so it lands early.
-Every other model call (re-reviews, fix drafts) waits until CI has CLEARED on the head: every check
-completed and SUCCESS, a SKIPPED check passes only when its reusable job `<name> / ...` passed, and the
-check named by `PRWATCH_REQUIRED_CHECK` (when set) has passed. An approval always waits for that at post
-time. Caps: `PRWATCH_DAILY_CAP` and `PRWATCH_PER_PR_CAP`,
-0 = no cap. A re-review also waits until the head has been unchanged for `PRWATCH_SETTLE_MIN` minutes,
-so several fix-up pushes cost one review; a re-request of my review skips the wait. A PR whose title
-contains one of `PRWATCH_SKIP_TITLE` is ignored completely. After `PRWATCH_MAX_CHANGE_ROUNDS` change
-requests of mine on one PR, new commits stop starting re-reviews: the author gets one comment, and a
-re-request of my review still gets one.
+## What is in here
 
-## How a review runs
-0. Re-review of a rebase: when the PR still adds and removes exactly the same lines, per file, as at the
-   head reviewed last (a rebase, a merge from the base branch, a squash), the stored verdict is posted
-   again on the new head with a note saying so, and no model runs. Approval rules are applied again.
-1. Code prepares a worktree at the head and an inputs folder: `input.diff`, `pr.md`, `project-context.md`
-   (copied from this folder: what a reviewer must know about the repository), and on a re-review
-   `previous.md` (the local review file, else my last review on that head from GitHub) and
-   `conversation.md` (what people wrote on the PR since then, bots left out). With a project brain mounted
-   (`PRWATCH_BRAIN_DIR`), `brain.md` lists up to `PRWATCH_BRAIN_MAX_LEAVES` vault leaves naming a changed file,
-   its directory or its package (gotchas, decisions, rejected, reference; investigations on an exact file),
-   copied under `brain/`; the run may read the rest of the vault. `input.diff` is
-   last-reviewed-head..HEAD for plain new commits, and the whole PR from its merge-base when the base moved.
-2. claude runs `--restricted --tools Read,Grep,Glob,Agent` with the same `--allowedTools`
-   (`dontAsk` denies anything not pre-approved), and an environment of only the Claude token, HOME and
-   PATH: the model has no shell, no network and no GitHub token. It runs lean: no settings, hooks, MCP
-   servers, skills or CLAUDE.md from the PR's checkout (`--setting-sources user`, `claudeMdExcludes`,
-   `--strict-mcp-config`, `--disable-slash-commands`); `project-context.md` replaces the repository's
-   CLAUDE.md. `PRWATCH_MAX_RUN_USD` stops a run at that spend. It follows the superpowers
-   `requesting-code-review` skill: writes three to eight questions the review must settle, dispatches one
-   reviewer (Opus; `PRWATCH_REVIEWER_MODEL_SMALL` for a diff of at most `PRWATCH_SMALL_PR_MAX_LINES`
-   changed lines touching no `PRWATCH_RISKY_PATHS`) with working rules (about 25 tool calls, stop at 40, verify each finding by quoting the
-   line, list what was "Not judged"), then confirms the critical and important findings itself. It returns
-   a JSON verdict (`--json-schema`, read from `structured_output`), validated in `render.py`. claude's raw
-   result is kept in `runs/` for 14 days.
-3. The verdict is stored as job `review:<pr>:<head>` (state `post`). A failed model run retries after
-   10 then 30 min, then the job is `stuck`.
-4. Code posts it (`post.py`): re-read the PR (head moved or closed: drop; merged at head: COMMENT), skip if
-   a review of mine is already on that head, decide the event in code from the counted findings, whatever
-   the model's verdict word says: any critical finding is REQUEST_CHANGES (`PRWATCH_ALLOW_REQUEST_CHANGES=1`,
-   not on my PR or a draft, else COMMENT); important findings are COMMENT; none is APPROVE when the PR is
-   not a draft, has no hold label, touches no infra path, is not mine, `PRWATCH_ALLOW_APPROVE=1`, and its
-   CI has cleared (still running: the post waits and looks again every minute; failed: COMMENT). Render the body (no em/en dashes, footer, hidden
-   `<!-- prwatch review:<pr>:<head> -->` marker), POST with `commit_id`, then GET it back.
-   Network/5xx: retry at 2, 10, 30, 60 min, then `stuck`. 422: `stuck`. 401/403: every write pauses
-   (`AUTH BROKEN`) until `gh api user` works again.
-
-Hold labels and infra paths (never approved automatically) are `HOLD_LABELS` and `INFRA_PATHS` in
-`render.py`; change them to suit your repository.
+| Path | What it is |
+|---|---|
+| `prwatch.env.example` | Repository, logins, watched authors, models, limits. Copy to `prwatch.env`; the only settings file. |
+| `project-context.example.md` | What a reviewer must know about the repository. Copy to `project-context.md`. |
+| `AGENT.md` | Notes for a Claude session asked about the watcher, or to review a PR by hand. |
+| `prompts/` | Every prompt the model gets: `review.md`, `rereview.md`, `review-brain.md`, `review-base-moved.md`, `fix-draft.md`, `brain-refresh.md`. |
+| `prwatch/main.py` | The loop, the workers and the command line. |
+| `prwatch/decide.py` | The rules: which PRs need a review, a re-review, a reviewer request, a fix draft. Pure, tested. |
+| `prwatch/review.py` | Prepares a run (worktree, diff, PR text, earlier review, conversation, brain leaves) and runs claude. |
+| `prwatch/render.py`, `prwatch/post.py` | The verdict's checks and layout; posting, read-back and retries. |
+| `prwatch/fetch.py`, `prwatch/act.py` | GitHub reads; reviewer requests, cap comments and fix drafts. |
+| `prwatch/store.py` | SQLite state: PRs, jobs, the call ledger with tokens and cost. |
+| `prwatch/brain.py`, `prwatch/brain_run.py` | Optional project brain: grounding reviews in a vault, proposing refreshes of its leaves. |
+| `tests/` | Unit tests for all of the above. |
+| `scripts/set-token.ps1` | Saves a long-lived Claude token into `claude.env` and restarts the container. |
+| `compose.yaml`, `Dockerfile`, `entrypoint.sh` | The container. |
+| `state/` | Everything prwatch writes: `prwatch.log`, `notifications.log`, `status.json`, `heartbeat.txt`, `runs/`, `drafts/`, `brain-backups/`. Git-ignored. |
 
 ## Setup
-1. `cp prwatch.env.example prwatch.env` and fill it in (repository, base branch, your logins, reviewer,
-   poll interval, settle time, caps, approvals, change requests, reviewer models), and `cp project-context.example.md project-context.md` and write it.
-2. The compose file mounts the superpowers skills from the Claude Code plugin cache
-   (`~/.claude/plugins/cache/superpowers-marketplace/superpowers/<version>/skills`); adjust the version.
-3. Claude token: run `claude setup-token` (about a year), then
-   `powershell -ExecutionPolicy Bypass -File set-token.ps1` here. It reads the token hidden, tries it with one
-   Haiku call, writes `claude.env` (git-ignored) and restarts the container. Without `claude.env`, prwatch
-   falls back to the desktop login (`~/.claude/.credentials.json`, read-only, never refreshed here): about
-   8 hours, renewed only by a `claude` run on the host, so reviews hold overnight.
-4. Start / rebuild (Git Bash, here): `GH_TOKEN=$(gh auth token) docker compose up -d --build`
-   (or `gh auth token -u <login>` when several accounts are signed in).
+
+1. `cp prwatch.env.example prwatch.env` and `cp project-context.example.md project-context.md`; fill both in.
+2. Mount the superpowers skills: `compose.yaml` reads them from the Claude Code plugin cache; adjust the version.
+3. Claude token: `claude setup-token`, then from this folder
+   `powershell -ExecutionPolicy Bypass -File scripts\set-token.ps1` (reads it hidden, tests it, restarts).
+4. Start: `GH_TOKEN=$(gh auth token) docker compose up -d --build` (`gh auth token -u <login>` with several accounts).
+
+## Try it by hand
+
+```bash
+docker exec prwatch-prwatch-1 python3 -m prwatch.main --review 1371 --test                       # full review, not posted
+docker exec prwatch-prwatch-1 python3 -m prwatch.main --review 1371 --test --reviewer-model sonnet
+docker exec prwatch-prwatch-1 python3 -m prwatch.main --review 1371                              # review and post it
+docker exec prwatch-prwatch-1 python3 -m prwatch.main --once --dry-run                           # what a pass would do
+docker run --rm -e INKHUB_DIR=/tmp/ink --entrypoint sh prwatch:local -c "mkdir -p /tmp/ink/prwatch/state && python3 -m unittest discover -s tests -t ."
+```
+
+## When a PR is reviewed
+
+- **First review:** your review is requested, the PR is pinned (`pins.txt`), or its author is in
+  `PRWATCH_WATCHED_AUTHORS`. It does not wait for CI.
+- **Re-review:** the head moved past the commit of your last review and files other than docs changed. It
+  waits until CI has cleared and the head has been quiet for `PRWATCH_SETTLE_MIN` minutes; a re-request of
+  your review skips the quiet wait. A rebase whose patch is line for line the same posts the earlier verdict
+  again with no model run; a near-identical one gets `compare.txt` so the run can keep the verdict cheaply. A
+  small change is checked by the run itself, without a reviewer subagent.
+- **Drafts:** reviewed when your review is requested on them, or every watched draft with
+  `PRWATCH_REVIEW_DRAFTS=1`. Never approved, never changes-requested. Your own drafts get nothing.
+- **Ignored:** a title containing one of `PRWATCH_SKIP_TITLE`; authors you do not watch, unless they ask.
+- **Capped:** after `PRWATCH_MAX_CHANGE_ROUNDS` change requests on one PR, new commits stop starting
+  re-reviews; the author gets one comment, and a re-request still works.
+
+## What gets posted
+
+Code counts the findings, whatever the model's verdict word says:
+
+| Findings | Posted as |
+|---|---|
+| any critical | REQUEST_CHANGES (`PRWATCH_ALLOW_REQUEST_CHANGES=1`), else COMMENT; COMMENT on your PRs and drafts |
+| important, no critical | COMMENT |
+| none | APPROVE when the PR is ready, has no hold label, touches no infra path, is not yours, `PRWATCH_ALLOW_APPROVE=1` and its CI has cleared (still running: the post waits; failed: COMMENT) |
+| PR merged at that head | COMMENT |
+| head moved during the run | COMMENT on the reviewed commit, saying the PR moved on |
+
+A review reads "Automated code review" or "Automated re-review", the commit it covers, one verdict line,
+then Strengths, the earlier findings' status (re-reviews), Critical, Important, Minor and Not judged, and
+ends with "Automated review (Claude Opus), reviewed at <sha7>." Hold labels and infra paths are
+`HOLD_LABELS` and `INFRA_PATHS` in `prwatch/render.py`.
+
+## Cost controls
+
+| Setting | Effect |
+|---|---|
+| `PRWATCH_REVIEWER_MODEL_SMALL`, `PRWATCH_SMALL_PR_MAX_LINES`, `PRWATCH_RISKY_PATHS` | The reviewer subagent runs on the smaller model for a small change touching no risky path. |
+| `PRWATCH_MAX_RUN_USD` | A run stops at this spend (claude's own estimate). |
+| `PRWATCH_DAILY_CAP`, `PRWATCH_PER_PR_CAP` | Model calls per day and per PR per day; 0 = no cap. |
+| `PRWATCH_MAX_PARALLEL` | Runs at once. |
+| `PRWATCH_SETTLE_MIN` | Quiet time before a re-review, so a burst of fix-up pushes costs one review. |
+| `PRWATCH_MAX_CHANGE_ROUNDS` | Change requests before automatic re-reviews stop. |
+
+Every call's tokens and list-price cost are in the `calls` table, today's totals in `state/status.json`.
 
 ## Operate
-- Stop everything: create `STOP` in the parent folder (ticks skip) or `docker compose stop`.
-- Pin a PR: add its number to `pins.txt`.
-- Logs: `prwatch.log` (all), `notifications.log` (things to look at), `heartbeat.txt`; reviews in `../reviews/`.
-- Status: every tick writes `status.json`: `OK`, `PAUSED (STOP file)`, `AUTH BROKEN`, model calls today,
-  tokens and list-price cost today, posts waiting, stuck jobs, Claude token state.
-- Spend: every call's tokens (input, output, cache read, cache write) and claude's list-price cost are in the
-  `calls` table; today's totals are in `status.json` (`usage_today`) and each review's log line.
-- Brain refresh (`PRWATCH_BRAIN_REFRESH=1`, mount rw): when master moves, each reference leaf whose named repo
-  files changed is due; after `PRWATCH_BRAIN_SETTLE_MIN` quiet minutes one `PRWATCH_BRAIN_MODEL` call per package
-  group (up to 6 leaves) returns edits. By default (`PRWATCH_BRAIN_APPLY=propose`) code only sets the leaf's
-  `status: stale` and logs the edits as a diff for a session to apply; with `apply`, code applies them (exact match once, frontmatter kept, no shrink past 40%,
-  untouched since read), backs the old leaf up to `brain-backups/`, and logs to `handoff/brain-refresh-log.md`.
-  Only in ticks without a review call. Backfill: `docker exec prwatch-prwatch-1 python3 main.py --brain-backfill
-  --dry-run`, then without `--dry-run` and with `--budget-usd N` (default 5) and optionally `--only a,b`. Undo:
-  `--brain-undo reference/<slug> [--date YYYY-MM-DD]` (the leaf then stays out of automatic refreshes).
-- Ledger: `docker exec prwatch-prwatch-1 python3 -c "import sqlite3;print(sqlite3.connect('/data/state.db').execute('select * from calls').fetchall())"`
-- Turn approvals or change requests off: `PRWATCH_ALLOW_APPROVE=0` or `PRWATCH_ALLOW_REQUEST_CHANGES=0` in
-  prwatch.env, re-run the start command.
+
+- **Stop:** create `STOP` in the parent folder (ticks skip) or `docker compose stop`.
+- **Where to look:** `state/notifications.log` (things to look at), `state/prwatch.log` (everything),
+  `state/runs/<pr>-<sha7>-<time>/` (each run's prompt and result, 14 days), reviews in `../reviews/`.
+- **Brain (optional):** with a vault in the `_CONVENTIONS` format mounted at `/brain`, reviews get the leaves
+  that name the changed files. With `PRWATCH_BRAIN_REFRESH=1` and the mount read-write, a reference leaf
+  whose named files changed is flagged `status: stale` and its proposed edits are logged
+  (`PRWATCH_BRAIN_APPLY=apply` writes them instead, with backup and `--brain-undo`). Backfill:
+  `--brain-backfill --dry-run`, then with `--budget-usd N`.
+
+## Limits
+
+- At most 60 open PRs are read per poll.
+- The container needs Docker Desktop running; nothing runs while the laptop sleeps.
 - Ideas taken from [errmakov-fuse/agent-codereview](https://github.com/errmakov-fuse/agent-codereview): the
-  lean run, project context, settle time, rebase re-approval by patch comparison, the reviewer's working
-  rules and questions, the conversation on re-reviews, the per-run spend limit, skip keywords, run records,
-  change requests on critical findings, a smaller reviewer model for small changes, the change-round cap.
-- Tests: `docker run --rm -e INKHUB_DIR=/tmp/ink --entrypoint sh prwatch:local -c "mkdir -p /tmp/ink/prwatch && python3 -m unittest test_decide test_post"`
+  lean run, project context, settle time, patch comparison, the reviewer's questions and working rules, the
+  conversation on re-reviews, spend limits, skip keywords, run records, change requests, the small-PR model,
+  the change-round cap, watched authors, drafts, parallel runs, the review layout and by-hand reviews.
