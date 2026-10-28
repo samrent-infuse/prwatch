@@ -2,9 +2,11 @@ import os
 
 # Before importing decide: identity and policy are read at import time.
 os.environ.update(PRWATCH_ME="me,me-alt", PRWATCH_REVIEWER="reviewer-bot",
-                  PRWATCH_REQUIRED_CHECK="scan-verdict", PRWATCH_REPO="example-org/example-repo")
+                  PRWATCH_REQUIRED_CHECK="scan-verdict", PRWATCH_REPO="example-org/example-repo",
+                  PRWATCH_SETTLE_MIN="30", PRWATCH_SKIP_TITLE="do not review")
 
 import json
+import subprocess
 import tempfile
 from pathlib import Path
 import unittest
@@ -163,6 +165,77 @@ class PreviousReview(unittest.TestCase):
             main.run_review(store, a)
         prev.assert_called_once_with(9, "h1")
         self.assertEqual(run.call_args.args[3], "from github")
+
+
+class SamePatch(unittest.TestCase):
+    """patch_lines against a real git repository: a rebase keeps the patch, an edit changes it."""
+
+    def git(self, *args):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=self.dir,
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    def commit(self, name, text, msg):
+        (Path(self.dir) / name).write_text(text)
+        self.git("add", "-A")
+        self.git("commit", "-qm", msg)
+        return self.git("rev-parse", "HEAD")
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        self.git("init", "-q", "-b", "main")
+        self.commit("a.py", "one\ntwo\n", "base")
+        self.git("checkout", "-qb", "pr")
+        self.reviewed = self.commit("a.py", "one\ntwo\nthree\n", "pr change")
+        self.git("checkout", "-q", "main")
+        newer = self.commit("b.py", "other\n", "base moves on")
+        self.git("update-ref", f"refs/remotes/origin/{review.BASE_BRANCH}", newer)
+        self.git("checkout", "-qb", "rebased")
+        self.rebased = self.commit("a.py", "one\ntwo\nthree\n", "pr change, rebased")
+        self.edited = self.commit("a.py", "one\ntwo\nthree!\n", "pr change, edited")
+        patcher = mock.patch.object(review, "REPO_DIR", Path(self.dir))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_rebase_keeps_the_patch_and_an_edit_changes_it(self):
+        self.assertEqual(review.patch_lines(self.reviewed), [("a.py", "+three")])
+        self.assertEqual(review.patch_lines(self.reviewed), review.patch_lines(self.rebased))
+        self.assertNotEqual(review.patch_lines(self.reviewed), review.patch_lines(self.edited))
+
+
+class CarriedVerdict(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = Store(f"{tmp.name}/s.db")
+        self.addCleanup(self.store.db.close)
+        self.store.upsert_job("review:9:h1", pr=9, head="h1", kind="review", state="posted",
+                              verdict_json=json.dumps(V_OK))
+        self.a = decide.Action(kind="rereview", pr=9, head="h2", base="h1", reason="")
+        for p in (mock.patch.object(main.act, "REVIEWS", Path(tmp.name)), mock.patch.object(main, "log")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_same_patch_posts_the_earlier_verdict_without_a_model_call(self):
+        with mock.patch.object(review, "same_patch", return_value=True), \
+                mock.patch.object(review, "run") as run:
+            main.run_review(self.store, self.a)
+            main.run_review(self.store, decide.Action(kind="rereview", pr=9, head="h3", base="h2", reason=""))
+        run.assert_not_called()
+        v = json.loads(self.store.job("review:9:h3")["verdict_json"])
+        self.assertEqual(v["findings"], V_OK["findings"])
+        self.assertTrue(v["summary"].startswith(main.CARRIED + "h2"))
+        self.assertEqual(v["summary"].count(main.CARRIED), 1)
+        self.assertEqual(self.store.calls_today(), 0)
+
+    def test_changed_or_unknown_patch_runs_the_model(self):
+        for same in (False, None):
+            with mock.patch.object(review, "same_patch", return_value=same), \
+                    mock.patch.object(main.fetch, "previous_review", return_value=""), \
+                    mock.patch.object(review, "run", return_value=(None, "boom", "", None)) as run:
+                main.run_review(self.store, self.a)
+            run.assert_called_once()
 
 
 class Usage(unittest.TestCase):

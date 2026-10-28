@@ -2,7 +2,8 @@ import os
 
 # Before importing decide: identity and policy are read at import time.
 os.environ.update(PRWATCH_ME="me,me-alt", PRWATCH_REVIEWER="reviewer-bot",
-                  PRWATCH_REQUIRED_CHECK="scan-verdict", PRWATCH_REPO="example-org/example-repo")
+                  PRWATCH_REQUIRED_CHECK="scan-verdict", PRWATCH_REPO="example-org/example-repo",
+                  PRWATCH_SETTLE_MIN="30", PRWATCH_SKIP_TITLE="do not review")
 
 import unittest
 
@@ -88,6 +89,25 @@ class Asked(unittest.TestCase):
     def test_unknown_files_counts_as_change(self):
         s = snap(reviews=[review("me", "COMMENTED", "h1")])
         self.assertEqual([a.kind for a in d.decide(s, d.Row(), files_since_last=None)[1]], ["rereview"])
+
+    def test_rereview_waits_for_the_head_to_settle(self):
+        s = snap(reviews=[review("me", "COMMENTED", "h1")])
+        _, acts, note = d.decide(s, d.Row(), files_since_last=["api/x.py"], head_age_min=5)
+        self.assertEqual(acts, [])
+        self.assertIn("settling", note)
+        self.assertEqual([a.kind for a in d.decide(s, d.Row(), files_since_last=["api/x.py"],
+                                                    head_age_min=31)[1]], ["rereview"])
+
+    def test_rerequest_skips_the_settle_wait(self):
+        s = snap(review_requests={"me"}, reviews=[review("me", "COMMENTED", "h1")])
+        self.assertEqual([a.kind for a in d.decide(s, d.Row(), files_since_last=["api/x.py"],
+                                                    head_age_min=1)[1]], ["rereview"])
+
+    def test_skip_keyword_in_title_ignores_the_pr(self):
+        s = snap(title="Fix thing (Do Not Review)", review_requests={"me"})
+        _, acts, note = d.decide(s, d.Row())
+        self.assertEqual(acts, [])
+        self.assertIn("skip keyword", note)
 
     def test_pin_counts_as_request(self):
         self.assertEqual([a.kind for a in d.decide(snap(), d.Row(), pins=frozenset({1}))[1]], ["review"])

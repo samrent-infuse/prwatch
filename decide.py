@@ -16,6 +16,11 @@ ME = {x.strip() for x in os.environ.get("PRWATCH_ME", "").split(",") if x.strip(
 REVIEWER = os.environ.get("PRWATCH_REVIEWER", "").strip()  # requested on my ready PRs; empty = none
 # A check name prefix that must have passed before any model call (e.g. a scanner verdict); empty = none.
 REQUIRED_CHECK = os.environ.get("PRWATCH_REQUIRED_CHECK", "").strip()
+# Minutes a re-review waits for the head to stay unchanged, so a run of fix-up pushes costs one review;
+# an explicit re-request acts at once. 0 = no wait.
+SETTLE_MIN = int(os.environ.get("PRWATCH_SETTLE_MIN", "0") or 0)
+# A PR whose title contains one of these (comma separated, any case) is ignored completely.
+SKIP_TITLE = [x.strip().lower() for x in os.environ.get("PRWATCH_SKIP_TITLE", "").split(",") if x.strip()]
 # A push touching only these gets no model call; the earlier verdict is not carried over.
 TRIVIAL_PATH = re.compile(r"(^docs/|\.md$|\.txt$|\.rst$)")
 MODEL_KINDS = {"review", "rereview", "fix_draft"}
@@ -42,6 +47,8 @@ class Row:
     last_rerequest_head: str = ""
     last_fix_review_id: int = 0
     skipped_head: str = ""
+    head_seen: str = ""     # the head prwatch saw last, and when it first saw it (settle time)
+    head_seen_at: str = ""
 
 
 @dataclass
@@ -90,10 +97,13 @@ def _my_last_reviewed_head(snap, row):
     return max(mine, key=lambda r: r["submitted"])["commit"] if mine else ""
 
 
-def decide(snap, row, pins=frozenset(), files_since_last=None):
+def decide(snap, row, pins=frozenset(), files_since_last=None, head_age_min=None):
     """Return (role, actions, note). `files_since_last`: paths changed between my last
-    reviewed head and this head, or None when unknown (treated as non-trivial)."""
+    reviewed head and this head, or None when unknown (treated as non-trivial).
+    `head_age_min`: minutes since this head was first seen, or None when unknown (no settle wait)."""
     role = role_of(snap, pins)
+    if any(k in snap.title.lower() for k in SKIP_TITLE):
+        return role, [], "ignored: skip keyword in the title"
     if snap.draft:
         return role, [], "draft"
     if role == "other":
@@ -103,7 +113,7 @@ def decide(snap, row, pins=frozenset(), files_since_last=None):
         return role, [], f"waiting for CI: {why}"
     if role == "mine":
         return role, *_decide_mine(snap, row)
-    return role, *_decide_asked(snap, row, pins, files_since_last)
+    return role, *_decide_asked(snap, row, pins, files_since_last, head_age_min)
 
 
 def _decide_mine(snap, row):
@@ -124,7 +134,7 @@ def _decide_mine(snap, row):
     return acts, ""
 
 
-def _decide_asked(snap, row, pins, files_since_last):
+def _decide_asked(snap, row, pins, files_since_last, head_age_min=None):
     # Done is what GitHub shows (a review of mine on this head), not what was written locally.
     if any(r["author"] in ME and r["commit"] == snap.head for r in snap.reviews):
         return [], ""
@@ -140,6 +150,9 @@ def _decide_asked(snap, row, pins, files_since_last):
     if files_since_last is not None and all(TRIVIAL_PATH.search(f) for f in files_since_last):
         return [Action("skip", snap.number, snap.head, base=last)], (
             f"docs-only push since {last[:7]}; no model call, re-pin to force a review")
+    rerequested = bool(snap.review_requests & ME)
+    if SETTLE_MIN and not rerequested and head_age_min is not None and head_age_min < SETTLE_MIN:
+        return [], f"settling: re-review once {snap.head[:7]} is {SETTLE_MIN} min old"
     return [Action("rereview", snap.number, snap.head, base=last,
                    reason=f"files changed since {last[:7]}")], ""
 

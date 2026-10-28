@@ -17,16 +17,30 @@ Every 180 s, ONE GraphQL read of all open PRs. Rules live in `decide.py` (pure, 
 Claude is called only when CI has CLEARED on the head: every check completed and SUCCESS, a SKIPPED
 check passes only when its reusable job `<name> / ...` passed, and the check named by
 `PRWATCH_REQUIRED_CHECK` (when set) has passed. Caps: `PRWATCH_DAILY_CAP` and `PRWATCH_PER_PR_CAP`,
-0 = no cap.
+0 = no cap. A re-review also waits until the head has been unchanged for `PRWATCH_SETTLE_MIN` minutes,
+so several fix-up pushes cost one review; a re-request of my review skips the wait. A PR whose title
+contains one of `PRWATCH_SKIP_TITLE` is ignored completely.
 
 ## How a review runs
-1. Code prepares a worktree at the head and an inputs folder: `input.diff` (BASE_SHA..HEAD), `pr.md`,
-   and `previous.md` on a re-review (the local review file, else my last review on that head from GitHub).
+0. Re-review of a rebase: when the PR still adds and removes exactly the same lines, per file, as at the
+   head reviewed last (a rebase, a merge from the base branch, a squash), the stored verdict is posted
+   again on the new head with a note saying so, and no model runs. Approval rules are applied again.
+1. Code prepares a worktree at the head and an inputs folder: `input.diff`, `pr.md`, `project-context.md`
+   (copied from this folder: what a reviewer must know about the repository), and on a re-review
+   `previous.md` (the local review file, else my last review on that head from GitHub) and
+   `conversation.md` (what people wrote on the PR since then, bots left out). `input.diff` is
+   last-reviewed-head..HEAD for plain new commits, and the whole PR from its merge-base when the base moved.
 2. claude runs `--restricted --tools Read,Grep,Glob,Agent` with the same `--allowedTools`
    (`dontAsk` denies anything not pre-approved), and an environment of only the Claude token, HOME and
-   PATH: the model has no shell, no network and no GitHub token. It follows the superpowers
-   `requesting-code-review` skill and returns a JSON verdict (`--json-schema`, read from
-   `structured_output`), validated in `render.py`.
+   PATH: the model has no shell, no network and no GitHub token. It runs lean: no settings, hooks, MCP
+   servers, skills or CLAUDE.md from the PR's checkout (`--setting-sources user`, `claudeMdExcludes`,
+   `--strict-mcp-config`, `--disable-slash-commands`); `project-context.md` replaces the repository's
+   CLAUDE.md. `PRWATCH_MAX_RUN_USD` stops a run at that spend. It follows the superpowers
+   `requesting-code-review` skill: writes three to eight questions the review must settle, dispatches one
+   Opus reviewer with working rules (about 25 tool calls, stop at 40, verify each finding by quoting the
+   line, list what was "Not judged"), then confirms the critical and important findings itself. It returns
+   a JSON verdict (`--json-schema`, read from `structured_output`), validated in `render.py`. claude's raw
+   result is kept in `runs/` for 14 days.
 3. The verdict is stored as job `review:<pr>:<head>` (state `post`). A failed model run retries after
    10 then 30 min, then the job is `stuck`.
 4. Code posts it (`post.py`): re-read the PR (head moved or closed: drop; merged at head: COMMENT), skip if
@@ -42,7 +56,7 @@ Hold labels and infra paths (never approved automatically) are `HOLD_LABELS` and
 
 ## Setup
 1. `cp prwatch.env.example prwatch.env` and fill it in (repository, base branch, your logins, reviewer,
-   caps, approvals).
+   settle time, caps, approvals), and `cp project-context.example.md project-context.md` and write it.
 2. The compose file mounts the superpowers skills from the Claude Code plugin cache
    (`~/.claude/plugins/cache/superpowers-marketplace/superpowers/<version>/skills`); adjust the version.
 3. Claude token: run `claude setup-token` (about a year), then
@@ -63,4 +77,7 @@ Hold labels and infra paths (never approved automatically) are `HOLD_LABELS` and
   `calls` table; today's totals are in `status.json` (`usage_today`) and each review's log line.
 - Ledger: `docker exec prwatch-prwatch-1 python3 -c "import sqlite3;print(sqlite3.connect('/data/state.db').execute('select * from calls').fetchall())"`
 - Turn approvals off: `PRWATCH_ALLOW_APPROVE=0` in prwatch.env, re-run the start command.
+- Ideas taken from [errmakov-fuse/agent-codereview](https://github.com/errmakov-fuse/agent-codereview): the
+  lean run, project context, settle time, rebase re-approval by patch comparison, the reviewer's working
+  rules and questions, the conversation on re-reviews, the per-run spend limit, skip keywords, run records.
 - Tests: `docker run --rm -e INKHUB_DIR=/tmp/ink --entrypoint sh prwatch:local -c "mkdir -p /tmp/ink/prwatch && python3 -m unittest test_decide test_post"`

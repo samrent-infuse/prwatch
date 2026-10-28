@@ -13,6 +13,7 @@ Status: prwatch/status.json every tick, for any external status line.
 """
 
 import argparse
+import datetime
 import json
 import os
 import sys
@@ -71,11 +72,48 @@ def atomic_write(path, text):
 
 # ------------------------------------------------------------------ reviews
 
+CARRIED = "Same patch as the reviewed "
+
+
+def carried_verdict(store, a):
+    """The stored verdict of the last reviewed head when the PR still adds and removes exactly the same
+    lines (a rebase, a merge from the base branch, a squash), else None. Costs git only, no model call."""
+    prev = store.job(f"review:{a.pr}:{a.base}") if a.base else None
+    if not prev or not prev["verdict_json"]:
+        return None
+    try:
+        if not review.same_patch(a.pr, a.base, a.head):
+            return None
+    except Exception as exc:  # any doubt: run the model
+        log(f"#{a.pr} patch compare {a.base[:7]}..{a.head[:7]} failed: {exc}")
+        return None
+    v = json.loads(prev["verdict_json"])
+    summary = v["summary"]
+    if summary.startswith(CARRIED):  # carried before: keep one note, not a chain
+        summary = summary.split("\n\n", 1)[-1]
+    v["summary"] = (f"{CARRIED}{a.base[:7]}: the PR adds and removes exactly the same lines; only the base or "
+                    f"the history changed. No new review was run, and the earlier findings stand.\n\n{summary}")
+    return v
+
+
+def keep_verdict(store, a, key, v, tries):
+    act.REVIEWS.mkdir(parents=True, exist_ok=True)
+    (act.REVIEWS / f"PR-{a.pr}-{a.head[:7]}.md").write_text(render.body(v, a.head, key), encoding="utf-8")
+    store.upsert_job(key, pr=a.pr, head=a.head, kind=a.kind, base_prev=a.base, state="post",
+                     model_tries=tries, verdict_json=json.dumps(v), next_try_at="", last_error="")
+
+
 def run_review(store, a):
     """Model run for one review job; stores the verdict as state 'post'."""
     key = f"review:{a.pr}:{a.head}"
     job = store.job(key)
     tries = job["model_tries"] if job else 0
+    carried = carried_verdict(store, a) if a.kind == "rereview" else None
+    if carried:
+        keep_verdict(store, a, key, carried, tries)
+        log(f"#{a.pr} {a.kind} at {a.head[:7]}: same patch as {a.base[:7]}, verdict carried over, "
+            "no model call; posting")
+        return
     prev = act.REVIEWS / f"PR-{a.pr}-{a.base[:7]}.md" if a.base else None
     prev_body = prev.read_text(encoding="utf-8") if prev and prev.exists() else ""
     if a.base and not prev_body:
@@ -93,10 +131,7 @@ def run_review(store, a):
     store.end_call(cid, "verdict " + v["verdict"] if v else err, usage)
     tries += 1
     if v:
-        act.REVIEWS.mkdir(parents=True, exist_ok=True)
-        (act.REVIEWS / f"PR-{a.pr}-{a.head[:7]}.md").write_text(render.body(v, a.head, key), encoding="utf-8")
-        store.upsert_job(key, pr=a.pr, head=a.head, kind=a.kind, base_prev=a.base, state="post",
-                         model_tries=tries, verdict_json=json.dumps(v), next_try_at="", last_error="")
+        keep_verdict(store, a, key, v, tries)
         c = render.counts(v)
         log(f"#{a.pr} {a.kind} at {a.head[:7]} (base {base[:7]}): {v['verdict']}, "
             f"{c['critical']}/{c['important']}/{c['minor']} critical/important/minor{usage_note(usage)}; posting")
@@ -133,13 +168,17 @@ def drain_posts(store):
 
 def handle_pr(store, snap, pinned, me):
     row, last_note = store.row(snap.number)
+    if row.head_seen != snap.head:
+        row.head_seen, row.head_seen_at = snap.head, stamp()
+    seen = datetime.datetime.strptime(row.head_seen_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+    head_age_min = (datetime.datetime.now(datetime.timezone.utc) - seen).total_seconds() / 60
     role = d.role_of(snap, pinned)
     last = row.last_reviewed_head or d._my_last_reviewed_head(snap, row)
     files = None
     if role == "asked" and last and last != snap.head and snap.head != row.skipped_head \
             and not snap.draft and d.ci_cleared(snap.checks)[0]:
         files = fetch.files_between(last, snap.head)
-    role, actions, note = d.decide(snap, row, pinned, files)
+    role, actions, note = d.decide(snap, row, pinned, files, head_age_min)
     row.role = role
     if role == "asked" and not row.last_reviewed_head and last:
         row.last_reviewed_head = last

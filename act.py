@@ -59,12 +59,15 @@ def fix_draft(n, head, review_id):
                                    body=r.get("body") or "(empty)", comments=inline)
         p = subprocess.run(
             ["claude", "-p", prompt, "--model", review.MODEL, "--effort", review.EFFORT,
-             "--restricted", "--tools", "Read,Edit,Write,Glob,Grep",
+             # no settings, hooks, MCP servers or skills from the checkout; its CLAUDE.md stays readable
+             "--setting-sources", "user", "--strict-mcp-config", "--no-chrome", "--disable-slash-commands",
+             *review.budget_args(), "--restricted", "--tools", "Read,Edit,Write,Glob,Grep",
              "--allowedTools", "Read", "Edit", "Write", "Glob", "Grep",
              "--permission-mode", "acceptEdits", "--permission-prompts", "none", "--no-session-persistence",
              "--output-format", "json"],
             cwd=wt, env=review.scrubbed_env(), capture_output=True, text=True, encoding="utf-8",
             timeout=review.TIMEOUT_S)
+        review.keep_run(f"fix-PR-{n}-review-{review_id}", p.stdout or p.stderr)
         try:
             out = json.loads(p.stdout)
         except json.JSONDecodeError:

@@ -101,3 +101,29 @@ def previous_review(n, head):
     comments = json.loads(gh("api", f"repos/{REPO}/pulls/{n}/reviews/{r['id']}/comments"))
     inline = "\n".join(f"{c['path']}:{c.get('line') or c.get('original_line')}: {c['body']}" for c in comments)
     return r["body"].strip() + ("\n\nInline comments:\n" + inline if inline else "")
+
+
+def _login(item):
+    return (item.get("user") or {}).get("login", "")
+
+
+def conversation_since(n, head):
+    """What people wrote on the PR after my last review on `head` (reviews, comments, inline comments),
+    oldest first, as text; "" when there is nothing or no review of mine on that head. Bots are left out.
+
+    An author's reply can settle a finding without a code change, so a re-review reads it."""
+    reviews = json.loads(gh("api", f"repos/{REPO}/pulls/{n}/reviews?per_page=100"))
+    mine = [r["submitted_at"] for r in reviews
+            if _login(r) in ME and r.get("commit_id") == head and r.get("submitted_at")]
+    if not mine:
+        return ""
+    since = max(mine)
+    items = [(r["submitted_at"], _login(r), f"review, {r['state'].lower()}", r.get("body") or "")
+             for r in reviews if (r.get("submitted_at") or "") > since]
+    for c in json.loads(gh("api", f"repos/{REPO}/issues/{n}/comments?since={since}&per_page=100")):
+        items.append((c["created_at"], _login(c), "comment", c.get("body") or ""))
+    for c in json.loads(gh("api", f"repos/{REPO}/pulls/{n}/comments?since={since}&per_page=100")):
+        items.append((c["created_at"], _login(c), f"on {c['path']}:{c.get('line') or c.get('original_line')}",
+                      c.get("body") or ""))
+    items = sorted(i for i in items if i[0] > since and i[3].strip() and not i[1].endswith("[bot]"))
+    return "\n\n".join(f"{t} {who} ({what}):\n{body.strip()}" for t, who, what, body in items)[:20000]

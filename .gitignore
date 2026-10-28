@@ -9,5 +9,7 @@ status.json
 heartbeat.txt
 pins.txt
 drafts/
+runs/
+project-context.md
 *.tmp
 __pycache__/
