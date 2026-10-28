@@ -139,6 +139,11 @@ class Apply(VaultCase):
         self.assertIn('source: "built from source; refreshed from #1401, #1403 at abcdef1 by prwatch"', text)
         self.assertIn("port 5432", (self.backups / "2026-10-28" / "reference" / "ref-b.md").read_text())
 
+    def test_source_names_at_most_three_prs(self):
+        brain.apply(self.leaf, [{"old": "port 5432", "new": "port 6432"}], self.mtime, list(range(1, 36)),
+                    "abcdef1234", self.backups, "2026-10-28")
+        self.assertIn("; refreshed from #1, #2, #3 and 32 more at abcdef1 by prwatch", self.leaf.path.read_text())
+
     def test_crlf_leaf_stays_crlf(self):
         self.leaf.path.write_bytes(self.leaf.path.read_bytes().replace(b"\n", b"\r\n"))
         out = self.apply([{"old": "port 5432", "new": "port 6432"}], self.leaf.path.stat().st_mtime)

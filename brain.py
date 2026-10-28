@@ -186,7 +186,8 @@ def apply(leaf, edits, read_mtime, prs, sha, backups, today):
         if n != 1:
             return "stuck", f"edit matches {n} times: {old[:60]!r}"
         text = text.replace(old, new)
-    prs_text = ", ".join(f"#{p}" for p in prs) or "master"
+    prs_text = (", ".join(f"#{p}" for p in prs[:3]) + (f" and {len(prs) - 3} more" if len(prs) > 3 else "")
+                or "master")  # the full list is in the refresh log
     text = _set_frontmatter(text, today, f"; refreshed from {prs_text} at {sha[:7]} by prwatch")
     fm_old, fm_new = parse_frontmatter(old_text), parse_frontmatter(text)
     if not fm_new.get("title") or fm_new.get("type") != fm_old.get("type"):
