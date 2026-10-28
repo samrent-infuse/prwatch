@@ -223,6 +223,14 @@ def log(vault, line):
         fh.write(f"- {line}\n")
 
 
+def log_counts(vault, day):
+    """{"edited": n, "suggestions": n} from the refresh log's lines of `day` (YYYY-MM-DD)."""
+    p = Path(vault) / LOG_LEAF
+    lines = p.read_text(encoding="utf-8").splitlines() if p.exists() else []
+    today = [l for l in lines if l.startswith(f"- {day}")]
+    return {"edited": sum("]] edited (" in l for l in today), "suggestions": sum(" suggestion (" in l for l in today)}
+
+
 def undo(vault, backups, folder_slug, date=None):
     """Put back a leaf's backup (`date`'s, else the newest). Returns the backup used."""
     folder, slug = folder_slug.split("/", 1)

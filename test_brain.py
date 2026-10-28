@@ -364,5 +364,55 @@ class Refresh(RepoCase):
         self.assertIn("current/", c.call_args.args[0])
 
 
+class Step(VaultCase):
+    def setUp(self):
+        super().setUp()
+        import act
+        import fetch
+        import main
+        import review
+        import store
+        self.main = main
+        self.store = store.Store(str(self.vault.parent / "s.db"))
+        self.addCleanup(self.store.db.close)
+        self.store.set_meta("brain_master", "h1")
+        for p in (mock.patch.object(review, "BRAIN_DIR", self.vault),
+                  mock.patch.object(review, "WORK", self.vault.parent / "work"),
+                  mock.patch.object(review, "git"), mock.patch.object(fetch, "master_head", return_value="h2"),
+                  mock.patch.object(act, "claude_ready", return_value=True), mock.patch.object(main, "log"),
+                  mock.patch.object(brain_run, "scan", return_value=[]),
+                  mock.patch.object(brain, "pick_group", return_value=["leaf"])):
+            p.start()
+        (self.vault.parent / "work").mkdir()
+
+    def test_brain_step_scans_when_master_moved(self):
+        with mock.patch.object(self.main, "BRAIN_REFRESH", False):
+            self.main.brain_step(self.store, model_call_made=False)
+        brain_run.scan.assert_called_once()
+        self.assertEqual(brain_run.scan.call_args.args[2:], ("h2", "h1"))
+        self.assertEqual(self.store.get_meta("brain_master"), "h2")
+
+    def test_brain_step_skips_refresh_when_a_review_ran_or_writer_off(self):
+        with mock.patch.object(brain_run, "refresh") as r:
+            with mock.patch.object(self.main, "BRAIN_REFRESH", True):
+                self.main.brain_step(self.store, model_call_made=True)
+            with mock.patch.object(self.main, "BRAIN_REFRESH", False):
+                self.main.brain_step(self.store, model_call_made=False)
+        r.assert_not_called()
+
+    def test_brain_step_refreshes_one_group_when_idle(self):
+        with mock.patch.object(brain_run, "refresh", return_value="1 edited") as r, \
+                mock.patch.object(self.main, "BRAIN_REFRESH", True):
+            self.main.brain_step(self.store, model_call_made=False)
+        r.assert_called_once()
+        self.assertEqual(r.call_args.args[2:4], (["leaf"], "h2"))
+
+    def test_log_counts_today(self):
+        brain.log(self.vault, "2026-10-28T10:00:00Z [[a]] edited (1 edits) from #1")
+        brain.log(self.vault, "2026-10-28T10:00:00Z suggestion (new_leaf) [[b]]: x")
+        brain.log(self.vault, "2026-10-27T10:00:00Z [[c]] edited (1 edits) from #2")
+        self.assertEqual(brain.log_counts(self.vault, "2026-10-28"), {"edited": 1, "suggestions": 1})
+
+
 if __name__ == "__main__":
     unittest.main()

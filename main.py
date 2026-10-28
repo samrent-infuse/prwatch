@@ -21,6 +21,8 @@ import time
 import traceback
 
 import act
+import brain
+import brain_run
 import decide as d
 import fetch
 import post
@@ -34,6 +36,10 @@ INTERVAL = int(os.environ.get("PRWATCH_INTERVAL", "180"))
 DRY = os.environ.get("PRWATCH_DRY_RUN") == "1"
 ALLOW_APPROVE = os.environ.get("PRWATCH_ALLOW_APPROVE") == "1"
 ALLOW_REQUEST_CHANGES = os.environ.get("PRWATCH_ALLOW_REQUEST_CHANGES") == "1"
+# The brain refresh: off unless 1 (grounding works either way); a due leaf waits this long after the
+# last master move that touched its files.
+BRAIN_REFRESH = os.environ.get("PRWATCH_BRAIN_REFRESH") == "1"
+BRAIN_SETTLE_MIN = int(os.environ.get("PRWATCH_BRAIN_SETTLE_MIN", "60") or 60)
 WAIT_RECHECK_MIN = 1  # an approval waiting for CI looks again after this long
 MODEL_RETRY_MIN = (10, 30)  # after the 3rd failed model run the job is stuck
 DB = os.environ.get("PRWATCH_DB", "/data/state.db")
@@ -171,6 +177,41 @@ def drain_posts(store):
             notify=outcome in ("posted", "stuck"))
 
 
+# -------------------------------------------------------------------- brain
+
+def brain_step(store, model_call_made):
+    """Follow master for the brain: scan when it moved, then (writer on, no review call this tick, Claude
+    token ready) refresh one group of settled due leaves."""
+    if not review.BRAIN_DIR or not review.BRAIN_DIR.is_dir():
+        return
+    head, prev = fetch.master_head(), store.get_meta("brain_master")
+    if not head:
+        return
+    index = brain.build_index(review.BRAIN_DIR, review.WORK / "brain_index.json")
+    if head != prev:
+        review.git("fetch", "--quiet", "origin", f"+{review.BASE_BRANCH}:refs/remotes/origin/{review.BASE_BRANCH}")
+        due = brain_run.scan(store, index, head, prev)
+        store.set_meta("brain_master", head)
+        if due:
+            log(f"brain: master at {head[:7]}; due: {', '.join(due)}")
+    if not BRAIN_REFRESH or model_call_made or not act.claude_ready():
+        return
+    group = brain.pick_group(store.brain_rows(), index, datetime.datetime.now(datetime.timezone.utc),
+                             BRAIN_SETTLE_MIN)
+    if group:
+        outcome = brain_run.refresh(store, review.BRAIN_DIR, group, head)
+        log(f"brain refresh of {', '.join(getattr(l, 'slug', str(l)) for l in group)} at {head[:7]}: {outcome}",
+            notify=True)
+
+
+def brain_status(store):
+    if not review.BRAIN_DIR or not review.BRAIN_DIR.is_dir():
+        return None
+    rows = store.brain_rows()
+    return {**brain.log_counts(review.BRAIN_DIR, stamp()[:10]), "refresh_on": BRAIN_REFRESH,
+            "due": sum(r["state"] == "due" for r in rows), "stuck": [r["slug"] for r in rows if r["state"] == "stuck"]}
+
+
 # --------------------------------------------------------------------- tick
 
 def handle_pr(store, snap, pinned, me):
@@ -245,6 +286,7 @@ def tick(store, me):
         log(f"GitHub auth works again as {me}; resuming", notify=True)
     try:
         pinned = pins()
+        calls_before = store.calls_today()
         for snap in fetch.open_prs():
             try:
                 handle_pr(store, snap, pinned, me)
@@ -254,6 +296,10 @@ def tick(store, me):
                 log(f"#{snap.number} error: {exc}", notify=True)
         if not DRY:
             drain_posts(store)
+            try:
+                brain_step(store, model_call_made=store.calls_today() > calls_before)
+            except Exception as exc:  # the brain never stops the review loop
+                log(f"brain step failed: {exc}", notify=True)
     except post.AuthBroken as exc:
         store.set_meta("auth_broken", f"{me}: {exc}")
         log(f"GitHub auth broken as {me}: {exc}; every write paused", notify=True)
@@ -265,7 +311,7 @@ def write_status(store, me, state):
     status = {
         "tick": stamp(), "state": state, "login": me, "interval_s": INTERVAL, "dry_run": DRY,
         "approve_enabled": ALLOW_APPROVE, "request_changes_enabled": ALLOW_REQUEST_CHANGES, "claude_token": act.claude_ready(), "claude_auth": act.claude_auth.state()[1],
-        "model_calls_today": store.calls_today(), "daily_cap": DAILY_CAP, "usage_today": store.usage_today(),
+        "model_calls_today": store.calls_today(), "daily_cap": DAILY_CAP, "usage_today": store.usage_today(), "brain": brain_status(store),
         "posts_waiting": len(store.jobs_in("post")),
         "stuck": [j["key"] for j in store.jobs_in("stuck")],
         "recent": [{"key": j["key"], "state": j["state"], "at": j["updated_at"], "error": j["last_error"]}
@@ -280,6 +326,7 @@ def main():
     args = ap.parse_args()
     act.OUT.mkdir(parents=True, exist_ok=True)
     store = Store(DB)
+    brain.log_event = lambda msg: log(f"brain: {msg}")
     me = fetch.gh("api", "user", "--jq", ".login").strip()
     log(f"start as {me}: interval {INTERVAL}s, caps {DAILY_CAP}/day {PER_PR_CAP}/PR/day, "
         f"approvals {'enabled' if ALLOW_APPROVE else 'off (comments only)'}, "
