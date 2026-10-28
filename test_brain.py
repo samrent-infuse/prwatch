@@ -234,6 +234,11 @@ class Scan(RepoCase):
         self.assertEqual(self.store_row("ref-b")["sync_sha"], self.head_tests_only)
         self.assertEqual(self.store_row("ref-b")["state"], "ok")
 
+    def test_leaf_without_a_sync_point_is_left_to_the_backfill(self):
+        self.store.db.execute("DELETE FROM brain_leaves")
+        self.assertEqual(brain_run.scan(self.store, self.index, self.head_touching_named), [])
+        self.assertIsNone(self.store_row("ref-b"))
+
     def test_unrelated_master_move_does_not_restart_the_settle_wait(self):
         brain_run.scan(self.store, self.index, self.head_touching_named)
         self.store.brain_upsert("ref-b", touched_at="2026-01-01T00:00:00Z")
@@ -357,6 +362,15 @@ class Refresh(RepoCase):
                     self.assertEqual(self.store_row("ref-b")["state"], "due")
                     self.assertTrue(self.store_row("ref-b")["next_try_at"])
         self.assertEqual(self.store_row("ref-b")["state"], "stuck")
+
+    def test_failure_while_preparing_closes_the_ledger_row_and_counts_a_try(self):
+        with mock.patch.object(brain_run, "_prepare", side_effect=RuntimeError("git broke")), \
+                mock.patch.object(brain_run, "_claude") as c:
+            out = brain_run.refresh(self.store, self.vault, [self.leaf], self.head_touching_named)
+        c.assert_not_called()
+        self.assertIn("git broke", out)
+        self.assertEqual(self.store.db.execute("select count(*) from calls where outcome is null").fetchone()[0], 0)
+        self.assertEqual(self.store_row("ref-b")["tries"], 1)
 
     def test_verify_mode_sends_current_files(self):
         with mock.patch.object(brain_run, "_claude", return_value=(json.dumps(OK_OUTPUT), 0)) as c:

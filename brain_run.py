@@ -91,15 +91,16 @@ def scan(store, index, head, prev_head=""):
     """After master moved from `prev_head` to `head`: mark due the reference leaves whose named files
     changed since their sync point, move the sync point of the rest. Returns the slugs newly due. A leaf
     already due restarts its settle wait only when this move touched its files. An unknown or missing
-    sync point is re-anchored from the leaf's as_of; an undated leaf without one is left to the backfill."""
+    sync point is re-anchored from the leaf's as_of. A leaf with no row yet is left to the backfill, which
+    sets its first sync point under a budget (scanning it here would make the loop an unbudgeted backfill)."""
     newly = []
     for leaf in index:
         if leaf.folder != "reference" or not leaf.repo_paths:
             continue
         row = store.brain_row(leaf.slug)
-        if row is not None and row["state"] == "stuck":
+        if row is None or row["state"] == "stuck":
             continue
-        sync = row["sync_sha"] if row is not None else ""
+        sync = row["sync_sha"]
         changed = changed_named_files(sync, head, leaf.repo_paths)
         if changed is None:
             sync = anchor(leaf.as_of)
@@ -108,7 +109,7 @@ def scan(store, index, head, prev_head=""):
                 continue  # undated, or older than the clone: the backfill's verify pass
             store.brain_upsert(leaf.slug, path=f"{leaf.folder}/{leaf.path.name}", sync_sha=sync)
         if changed:
-            already = row is not None and row["state"] == "due"
+            already = row["state"] == "due"
             if not already:
                 newly.append(leaf.slug)
             if not already or (prev_head and changed_named_files(prev_head, head, leaf.repo_paths)):
@@ -211,7 +212,11 @@ def refresh(store, vault, group, head, kind="brain_refresh", verify=False):
     review.git("worktree", "add", "--detach", str(wt), head)
     cid = store.start_call(0, kind, BRAIN_MODEL, head, slugs)
     try:
-        mtimes, prs = _prepare(group, head, inputs, store, verify)
+        try:
+            mtimes, prs = _prepare(group, head, inputs, store, verify)
+        except Exception as exc:  # git or file trouble: close the ledger row and count a try
+            store.end_call(cid, f"prepare failed: {exc}")
+            return _failed(store, group, f"prepare failed: {exc}")
         what = (VERIFY_WHAT if verify else DIFF_WHAT).format(head=head)
         stdout, rc = _claude(PROMPT.format(inputs=inputs, what=what, head=head), wt, [inputs])
         review.keep_run(f"brain-{head[:7]}", stdout)
