@@ -247,6 +247,7 @@ def _apply_result(store, vault, group, head, result, mtimes, prs, kind):
     by_slug = {l.slug: l for l in group}
     done = {"edited": 0, "flagged": 0, "unchanged": 0, "skipped": 0, "stuck": 0}
     for r in result["leaves"]:
+        r["slug"] = r["slug"].strip().removesuffix(".md").split("/")[-1]  # the model may answer "reference/<slug>"
         leaf = by_slug.get(r["slug"])
         if leaf is None:
             continue

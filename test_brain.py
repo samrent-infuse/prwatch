@@ -384,6 +384,14 @@ class Refresh(RepoCase):
         self.assertEqual(tuple(self.store.db.execute("select kind, cost_usd from calls").fetchone()),
                          ("brain_refresh", 0.31))
 
+    def test_slug_given_with_its_folder_still_matches(self):
+        out = json.loads(json.dumps(OK_OUTPUT))
+        out["structured_output"]["leaves"][0]["slug"] = "reference/ref-b"
+        with mock.patch.object(brain_run, "_claude", return_value=(json.dumps(out), 0)):
+            result = brain_run.refresh(self.store, self.vault, [self.leaf], self.head_touching_named)
+        self.assertIn("1 flagged", result)
+        self.assertEqual(self.store_row("ref-b")["last_error"], "")
+
     def test_unchanged_only_moves_the_sync_point(self):
         out = {**OK_OUTPUT, "structured_output": {"leaves": [{"slug": "ref-b", "verdict": "unchanged", "edits": [],
                                                               "why": ""}], "suggestions": []}}
