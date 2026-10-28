@@ -231,3 +231,28 @@ def undo(vault, backups, folder_slug, date=None):
         raise FileNotFoundError(f"no backup of {folder_slug}" + (f" from {date}" if date else ""))
     shutil.copyfile(found[-1], Path(vault) / folder / f"{slug}.md")
     return found[-1]
+
+
+def plain(s):
+    """Text written into the vault: no em or en dashes, one line."""
+    return re.sub(r"\s*[—–]\s*", ", ", " ".join(str(s or "").split()))
+
+
+def _packages(leaf):
+    return {p.split("/", 1)[0] for p in leaf.repo_paths}
+
+
+def pick_group(rows, index, now, settle_min, max_leaves=6):
+    """The next leaves to refresh together: due rows untouched for `settle_min` minutes and past their
+    retry time, the oldest first, then others sharing one of its top-level packages, at most `max_leaves`."""
+    cutoff = (now - datetime.timedelta(minutes=settle_min)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    stamp_now = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    leaves = {l.slug: l for l in index}
+    ready = sorted((r for r in rows if r["state"] == "due" and r["touched_at"] <= cutoff
+                    and (not r["next_try_at"] or r["next_try_at"] <= stamp_now) and r["slug"] in leaves),
+                   key=lambda r: r["touched_at"])
+    if not ready:
+        return []
+    first = leaves[ready[0]["slug"]]
+    group = [first] + [leaves[r["slug"]] for r in ready[1:] if _packages(leaves[r["slug"]]) & _packages(first)]
+    return group[:max_leaves]

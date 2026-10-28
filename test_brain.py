@@ -6,6 +6,7 @@ os.environ.update(PRWATCH_ME="me,me-alt", PRWATCH_REVIEWER="reviewer-bot",
                   PRWATCH_SETTLE_MIN="30", PRWATCH_SKIP_TITLE="do not review",
                   PRWATCH_MAX_CHANGE_ROUNDS="2")
 
+import datetime
 import json
 import subprocess
 import tempfile
@@ -268,6 +269,99 @@ class Scan(RepoCase):
         with mock.patch.object(fetch, "gh", return_value=json.dumps(data)):
             fetch.open_prs()
         self.assertEqual(fetch.master_head(), "abc")
+
+
+class Group(VaultCase):
+    def setUp(self):
+        super().setUp()
+        for slug, path in (("ref-old", "inkhub_ai/a.py"), ("ref-same-package", "inkhub_ai/b/c.py"),
+                           ("ref-recent", "inkhub_ai/d.py"), ("ref-other", "inkhub_crawling/e.py")):
+            (self.vault / "reference" / f"{slug}.md").write_text(leaf_text("reference", "2026-04-20", "current", path))
+        self.index = brain.build_index(self.vault)
+        self.now = datetime.datetime(2026, 10, 28, 12, 0, tzinfo=datetime.timezone.utc)
+        row = lambda slug, touched, state="due", nxt="": {"slug": slug, "state": state, "touched_at": touched,
+                                                         "next_try_at": nxt}
+        self.rows = [row("ref-same-package", "2026-10-28T10:30:00Z"), row("ref-old", "2026-10-28T10:00:00Z"),
+                     row("ref-recent", "2026-10-28T11:50:00Z"), row("ref-other", "2026-10-28T09:00:00Z", "ok"),
+                     row("ref-b", "2026-10-28T09:00:00Z", "due", "2026-10-28T13:00:00Z")]
+
+    def test_pick_group_waits_for_settle_and_groups_by_package(self):
+        group = brain.pick_group(self.rows, self.index, self.now, 60)
+        self.assertEqual([l.slug for l in group], ["ref-old", "ref-same-package"])
+
+    def test_pick_group_caps_at_six(self):
+        rows = []
+        for i in range(9):
+            (self.vault / "reference" / f"many-{i}.md").write_text(leaf_text("reference", "2026-04-20", "current",
+                                                                             f"inkhub_ai/m{i}.py"))
+            rows.append({"slug": f"many-{i}", "state": "due", "touched_at": "2026-10-28T08:00:00Z", "next_try_at": ""})
+        self.assertEqual(len(brain.pick_group(rows, brain.build_index(self.vault), self.now, 60)), 6)
+
+
+OK_OUTPUT = {"type": "result", "subtype": "success", "is_error": False, "total_cost_usd": 0.31,
+             "modelUsage": {"claude-sonnet-5-5": {"inputTokens": 100, "outputTokens": 50,
+                                                  "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0}},
+             "structured_output": {"leaves": [{"slug": "ref-b", "verdict": "edited",
+                                               "edits": [{"old": "port 5432", "new": "port 6432"}],
+                                               "why": "routes.py: b"}],
+                                   "suggestions": [{"kind": "manifest_hook", "slug": "ref-b", "text": "say 6432"}]}}
+
+
+class Refresh(RepoCase):
+    def setUp(self):
+        super().setUp()
+        import review
+        mock.patch.object(review, "WORK", self.vault.parent / "work").start()
+        mock.patch.object(review, "HERE", self.vault.parent / "here").start()
+        self.store.brain_upsert("ref-b", path="reference/ref-b.md", sync_sha=self.base, state="due",
+                                touched_at="2026-10-28T00:00:00Z")
+        self.leaf = {l.slug: l for l in self.index}["ref-b"]
+        self.git("checkout", "-q", "main")
+
+    def test_validate_rejects_unknown_verdict_and_bad_edits(self):
+        self.assertIsNone(brain_run.validate({"leaves": [{"slug": "x", "verdict": "maybe"}], "suggestions": []})[0])
+        self.assertIsNone(brain_run.validate({"leaves": [{"slug": "x", "verdict": "edited", "edits": [{"old": 1}]}]})[0])
+        self.assertIsNotNone(brain_run.validate({"leaves": [{"slug": "x", "verdict": "unchanged", "edits": [],
+                                                             "why": ""}], "suggestions": []})[0])
+
+    def test_refresh_applies_edits_logs_and_records_spend(self):
+        with mock.patch.object(brain_run, "_claude", return_value=(json.dumps(OK_OUTPUT), 0)) as c:
+            brain_run.refresh(self.store, self.vault, [self.leaf], self.head_touching_named)
+        prompt = c.call_args.args[0]
+        self.assertIn("diff.txt", prompt)
+        row = self.store_row("ref-b")
+        self.assertEqual((row["state"], row["sync_sha"]), ("ok", self.head_touching_named))
+        self.assertIn("port 6432", self.leaf.path.read_text())
+        self.assertIn("#8", self.leaf.path.read_text())  # the PR number from the commit subject
+        log = (self.vault / "handoff" / "brain-refresh-log.md").read_text()
+        self.assertIn("[[ref-b]]", log)
+        self.assertIn("say 6432", log)
+        self.assertEqual(tuple(self.store.db.execute("select kind, cost_usd from calls").fetchone()),
+                         ("brain_refresh", 0.31))
+
+    def test_unchanged_only_moves_the_sync_point(self):
+        out = {**OK_OUTPUT, "structured_output": {"leaves": [{"slug": "ref-b", "verdict": "unchanged", "edits": [],
+                                                              "why": ""}], "suggestions": []}}
+        before = self.leaf.path.read_bytes()
+        with mock.patch.object(brain_run, "_claude", return_value=(json.dumps(out), 0)):
+            brain_run.refresh(self.store, self.vault, [self.leaf], self.head_touching_named)
+        self.assertEqual(self.leaf.path.read_bytes(), before)
+        self.assertEqual(self.store_row("ref-b")["sync_sha"], self.head_touching_named)
+
+    def test_failed_call_retries_then_sticks(self):
+        with mock.patch.object(brain_run, "_claude", return_value=("not json", 1)):
+            for i in range(3):
+                self.store.brain_upsert("ref-b", next_try_at="")
+                brain_run.refresh(self.store, self.vault, [self.leaf], self.head_touching_named)
+                if i == 0:
+                    self.assertEqual(self.store_row("ref-b")["state"], "due")
+                    self.assertTrue(self.store_row("ref-b")["next_try_at"])
+        self.assertEqual(self.store_row("ref-b")["state"], "stuck")
+
+    def test_verify_mode_sends_current_files(self):
+        with mock.patch.object(brain_run, "_claude", return_value=(json.dumps(OK_OUTPUT), 0)) as c:
+            brain_run.refresh(self.store, self.vault, [self.leaf], self.head_touching_named, verify=True)
+        self.assertIn("current/", c.call_args.args[0])
 
 
 if __name__ == "__main__":
