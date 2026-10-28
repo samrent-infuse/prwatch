@@ -20,7 +20,9 @@ read {skill}/SKILL.md and its template {skill}/code-reviewer.md, and follow them
   be wrong; keep one you could not settle at its severity, marked inferred.
 - Plain punctuation, no em or en dashes, blameless.
 Return the structured result: verdict "approve" only when the change is ready to merge with zero critical and
-zero important findings, otherwise "comment"; a short summary that ends with one line "Not judged: ..." (or
-"Not judged: nothing"); every finding with severity, file, line, title and detail. The approval is decided
+zero important findings, otherwise "comment"; a summary of one or two sentences (why, and what must happen
+before what); strengths (what is done well, briefly and specifically); not_judged (each part not reviewed in
+depth and each question not settled, one line with the reason; empty when there is none); every finding with
+severity, file, line, title and detail. The approval is decided
 from the findings alone, not from the verdict word: anything that should stop this change from merging,
 including something you could not verify, must be a critical or important finding.

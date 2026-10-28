@@ -73,7 +73,7 @@ def fix_draft(n, head, review_id):
              "--output-format", "json"],
             cwd=wt, env=review.scrubbed_env(), capture_output=True, text=True, encoding="utf-8",
             timeout=review.TIMEOUT_S)
-        review.keep_run(f"fix-PR-{n}-review-{review_id}", p.stdout or p.stderr)
+        review.keep_run(f"fix-PR-{n}-review-{review_id}", {"prompt.md": prompt, "result.json": p.stdout or p.stderr})
         try:
             out = json.loads(p.stdout)
         except json.JSONDecodeError:

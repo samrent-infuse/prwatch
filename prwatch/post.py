@@ -64,15 +64,18 @@ def post(n, head, key, verdict, allow_approve, allow_request_changes=False):
     pr = pr_facts(n, head)
     if pr["state"] == "CLOSED":
         return "dropped", "closed unmerged", None
-    if pr["head"] != head and not pr["merged_at_head"]:
-        return "dropped", f"head moved to {pr['head'][:7]}", None
+    # Head moved during the run: the review is still worth reading, so it goes out as a COMMENT on the commit
+    # it covers; the new head gets its own review by the normal rules.
+    moved_to = pr["head"] if pr["head"] != head and not pr["merged_at_head"] else ""
     rid = existing_review(n, head, key)
     if rid:
         return "posted", "already on GitHub", rid
     event, why = render.decide_event(verdict, pr, ME, allow_approve, allow_request_changes)
-    if event == "WAIT":
+    if moved_to:
+        event, why = "COMMENT", f"head moved to {moved_to[:7]}"
+    elif event == "WAIT":
         return "wait", f"approval waits: {why}", None
-    payload = {"commit_id": head, "event": event, "body": render.body(verdict, head, key)}
+    payload = {"commit_id": head, "event": event, "body": render.body(verdict, head, key, event=event, moved_to=moved_to)}
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as fh:
         json.dump(payload, fh)
     status, data, err = _api("-X", "POST", f"repos/{REPO}/pulls/{n}/reviews", "--input", fh.name)

@@ -27,9 +27,21 @@ SCHEMA = {
             },
             "required": ["severity", "title", "detail"],
         }},
+        "strengths": {"type": "array", "items": {"type": "string"}},
+        "not_judged": {"type": "array", "items": {"type": "string"}},
+        "earlier": {"type": "array", "items": {  # re-reviews: the earlier critical and important findings
+            "type": "object",
+            "properties": {
+                "finding": {"type": "string"},
+                "status": {"type": "string", "enum": ["fixed", "still present", "partly fixed", "no longer applies"]},
+                "checked_at": {"type": "string"},
+            },
+            "required": ["finding", "status"],
+        }},
     },
     "required": ["verdict", "summary", "findings"],
 }
+VERDICT_LINE = {"APPROVE": "approve", "REQUEST_CHANGES": "changes requested", "COMMENT": "comment"}
 
 
 def validate(v):
@@ -95,22 +107,37 @@ def marker(key):
     return f"<!-- prwatch {key} -->"
 
 
-def body(v, head, key):
-    c = counts(v)
-    lines = [plain(v["summary"]), ""]
-    if v["findings"]:
-        lines.append(f"Findings: {c['critical']} critical, {c['important']} important, {c['minor']} minor.")
-        lines.append("")
-        order = {s: i for i, s in enumerate(SEVERITIES)}
-        for i, f in enumerate(sorted(v["findings"], key=lambda f: order[f["severity"]]), 1):
-            where = f.get("file") or ""
-            if where and f.get("line"):
-                where += f":{f['line']}"
-            lines.append(f"{i}. **{f['severity'].capitalize()}**{' `' + where + '`' if where else ''}: {plain(f['title'])}")
+def body(v, head, key, event="", moved_to=""):
+    """The review as posted: heading, what was reviewed, the verdict line (when `event` is known), Strengths,
+    the earlier findings' status (re-reviews), Critical, Important, Minor, Not judged, footer, hidden marker.
+    Empty sections are left out. `moved_to`: the PR's head when it moved past `head` during the run."""
+    rereview = v.get("kind") == "rereview"
+    reviewed = f"Reviewed `{head[:7]}` against the PR description. Tests were not run."
+    if moved_to:
+        reviewed += f" The PR has since moved to `{moved_to[:7]}`, which is reviewed on its own."
+    summary = plain(v["summary"])
+    lines = ["## Automated re-review" if rereview else "## Automated code review", "", reviewed, "",
+             f"**Verdict: {VERDICT_LINE.get(event, event.lower())}.** {summary}" if event else summary, ""]
+
+    def section(title, items):
+        if items:
+            lines.extend([f"### {title}", *items, ""])
+
+    section("Strengths", [f"- {plain(s)}" for s in v.get("strengths") or []])
+    if rereview and v.get("earlier"):
+        section("Status of the earlier findings", ["| # | Finding | Status | Checked at |", "|---|---|---|---|"] + [
+            f"| {i} | {plain(e.get('finding'))} | {plain(e.get('status'))} | `{plain(e.get('checked_at')) or '-'}` |"
+            for i, e in enumerate(v["earlier"], 1)])
+    for severity in SEVERITIES:
+        items = []
+        for i, f in enumerate((f for f in v["findings"] if f["severity"] == severity), 1):
+            where = (f.get("file") or "") + (f":{f['line']}" if f.get("file") and f.get("line") else "")
+            items.append(f"{i}. {'`' + where + '`: ' if where else ''}{plain(f['title'])}")
             if f.get("detail"):
-                lines.append(f"   {plain(f['detail'])}")
-        lines.append("")
-    else:
+                items.append(f"   {plain(f['detail'])}")
+        section(severity.capitalize(), items)
+    if not v["findings"]:
         lines += ["No findings.", ""]
+    section("Not judged", [f"- {plain(s)}" for s in v.get("not_judged") or []])
     lines += [FOOTER.format(sha7=head[:7]), marker(key)]
     return "\n".join(lines) + "\n"

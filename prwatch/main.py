@@ -110,6 +110,7 @@ def carried_verdict(store, a):
 
 
 def keep_verdict(store, a, key, v, tries):
+    v = {**v, "kind": a.kind}  # the body is headed "re-review" for a rereview
     act.REVIEWS.mkdir(parents=True, exist_ok=True)
     (act.REVIEWS / f"PR-{a.pr}-{a.head[:7]}.md").write_text(render.body(v, a.head, key), encoding="utf-8")
     store.upsert_job(key, pr=a.pr, head=a.head, kind=a.kind, base_prev=a.base, state="post",

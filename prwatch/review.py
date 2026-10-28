@@ -206,18 +206,22 @@ def budget_args():
     return ["--max-budget-usd", f"{MAX_RUN_USD:g}"] if MAX_RUN_USD > 0 else []
 
 
-def keep_run(name, text):
-    """Keep claude's raw result for debugging; drop records older than RUNS_KEEP_DAYS. Never fails a run."""
+def keep_run(name, files):
+    """Keep what a run got and returned, {file name: text}, in RUNS/<name>-<time>/, and drop records older
+    than RUNS_KEEP_DAYS. Returns the folder, or None when it could not be written. Never fails a run."""
     try:
-        RUNS.mkdir(parents=True, exist_ok=True)
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        (RUNS / f"{name}-{stamp}.json").write_text(text or "", encoding="utf-8")
+        folder = RUNS / f"{name}-{stamp}"
+        folder.mkdir(parents=True, exist_ok=True)
+        for fname, text in files.items():
+            (folder / fname).write_text(text or "", encoding="utf-8")
         cutoff = time.time() - RUNS_KEEP_DAYS * 86400
-        for f in RUNS.glob("*.json"):
-            if f.stat().st_mtime < cutoff:
-                f.unlink()
+        for old in RUNS.iterdir():
+            if old.stat().st_mtime < cutoff:
+                shutil.rmtree(old, ignore_errors=True) if old.is_dir() else old.unlink()
+        return folder
     except OSError:
-        pass
+        return None
 
 
 def run(n, head, base_prev="", prev_body="", reviewer=None):
@@ -247,7 +251,7 @@ def run(n, head, base_prev="", prev_body="", reviewer=None):
              "--output-format", "json", "--json-schema", json.dumps(render.SCHEMA),
              *budget_args(), "--no-session-persistence"],
             cwd=wt, env=scrubbed_env(), capture_output=True, text=True, encoding="utf-8", timeout=TIMEOUT_S)
-        keep_run(f"PR-{n}-{head[:7]}", p.stdout or p.stderr)
+        keep_run(f"PR-{n}-{head[:7]}", {"prompt.md": prompt, "result.json": p.stdout or p.stderr})
         try:
             out = json.loads(p.stdout)
         except json.JSONDecodeError:

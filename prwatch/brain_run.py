@@ -210,8 +210,9 @@ def refresh(store, vault, group, head, kind="brain_refresh", verify=False):
             store.end_call(cid, f"prepare failed: {exc}")
             return _failed(store, group, f"prepare failed: {exc}")
         what = (VERIFY_WHAT if verify else DIFF_WHAT).format(head=head)
-        stdout, rc = _claude(PROMPT.format(inputs=inputs, what=what, head=head), wt, [inputs])
-        review.keep_run(f"brain-{head[:7]}", stdout)
+        prompt = PROMPT.format(inputs=inputs, what=what, head=head)
+        stdout, rc = _claude(prompt, wt, [inputs])
+        review.keep_run(f"brain-{head[:7]}", {"prompt.md": prompt, "result.json": stdout})
         try:
             out = json.loads(stdout)
         except (json.JSONDecodeError, TypeError):

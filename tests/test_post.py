@@ -68,7 +68,31 @@ class Render(unittest.TestCase):
         self.assertNotIn("–", b)
         self.assertIn("Automated review (Claude Opus), reviewed at abcdef1.", b)
         self.assertIn("<!-- prwatch review:1:abcdef1234 -->", b)
-        self.assertIn("**Minor** `a.py:3`: naming", b)
+        self.assertIn("### Minor\n1. `a.py:3`: naming", b)
+
+    def test_body_layout_like_a_reviewer_writes_it(self):
+        v = {**V_OK, "strengths": ["Small and tested."], "not_judged": ["the migration, not run"],
+             "findings": V_OK["findings"] + [{"severity": "critical", "file": "b.py", "line": 9, "title": "boom",
+                                               "detail": "it breaks"}]}
+        b = render.body(v, "abcdef1234", "review:1:abcdef1234", event="REQUEST_CHANGES")
+        self.assertTrue(b.startswith("## Automated code review\n"))
+        self.assertIn("**Verdict: changes requested.**", b)
+        for h in ("### Strengths\n- Small and tested.", "### Critical\n1. `b.py:9`: boom\n   it breaks",
+                  "### Not judged\n- the migration, not run"):
+            self.assertIn(h, b)
+        self.assertNotIn("### Important", b)  # empty sections are left out
+        self.assertLess(b.index("### Critical"), b.index("### Minor"))
+
+    def test_rereview_body_has_the_earlier_findings_table(self):
+        v = {**V_OK, "kind": "rereview", "earlier": [{"finding": "null check", "status": "fixed", "checked_at": "a.py:4"}]}
+        b = render.body(v, "abcdef1234", "review:1:abcdef1234", event="APPROVE")
+        self.assertTrue(b.startswith("## Automated re-review\n"))
+        self.assertIn("**Verdict: approve.**", b)
+        self.assertIn("| 1 | null check | fixed | `a.py:4` |", b)
+
+    def test_moved_head_note(self):
+        b = render.body(V_OK, "abcdef1234", "review:1:abcdef1234", event="COMMENT", moved_to="9999999aaa")
+        self.assertIn("The PR has since moved to `9999999`", b)
 
 
 class Post(unittest.TestCase):
@@ -89,10 +113,15 @@ class Post(unittest.TestCase):
         self.assertEqual((out, rid), ("posted", 5))
         api.assert_not_called()
 
-    def test_head_moved_drops(self):
-        (out, _, _), api = self.run_post([], pr={**PR, "head": "h3"})
-        self.assertEqual(out, "dropped")
-        api.assert_not_called()
+    def test_head_moved_posts_a_comment_on_the_reviewed_commit(self):
+        marker = render.marker("review:1:h2")
+        (out, detail, _), api = self.run_post([(200, {"id": 9}, ""), (200, {"id": 9, "body": marker}, "")],
+                                              pr={**PR, "head": "h3"})
+        self.assertEqual(out, "posted")
+        self.assertTrue(detail.startswith("COMMENT"))
+        payload = json.loads(Path(api.call_args_list[0].args[-1]).read_text())
+        self.assertEqual((payload["event"], payload["commit_id"]), ("COMMENT", "h2"))
+        self.assertIn("moved to `h3`", payload["body"])
 
     def test_5xx_and_network_retry_422_sticks(self):
         self.assertEqual(self.run_post([(502, None, "HTTP 502")])[0][0], "retry")
@@ -145,6 +174,16 @@ class Workers(unittest.TestCase):
                 mock.patch.object(main, "run_review", side_effect=post.AuthBroken("HTTP 401")):
             main._work(decide.Action(kind="review", pr=5, head="h5"))
         self.assertIn("HTTP 401", self.store.get_meta("auth_broken"))
+
+
+class RunRecords(unittest.TestCase):
+    def test_a_run_keeps_its_files_in_one_folder(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with mock.patch.object(review, "RUNS", Path(tmp.name)):
+            folder = review.keep_run("PR-1-abc1234", {"prompt.md": "p", "result.json": "{}"})
+        self.assertEqual(sorted(x.name for x in folder.iterdir()), ["prompt.md", "result.json"])
+        self.assertTrue(folder.name.startswith("PR-1-abc1234-"))
 
 
 class GitLock(unittest.TestCase):
