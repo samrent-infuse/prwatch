@@ -320,13 +320,48 @@ def write_status(store, me, state):
     atomic_write(STATUS, json.dumps(status, indent=1) + "\n")
 
 
+def brain_undo(store, folder_slug, date):
+    """Put a leaf's backup back and stop automatic refreshes of it (state stuck) until a person looks."""
+    used = brain.undo(review.BRAIN_DIR, review.HERE / "brain-backups", folder_slug, date)
+    slug = folder_slug.split("/", 1)[1]
+    store.brain_upsert(slug, path=f"{folder_slug}.md", state="stuck", last_error=f"undone by hand from {used}")
+    brain.log(review.BRAIN_DIR, f"{stamp()} [[{slug}]] undone by hand: restored {used}; automatic refresh off for it")
+    return used
+
+
+def brain_command(store, args):
+    """--brain-backfill and --brain-undo, run with docker exec beside the loop."""
+    if not review.BRAIN_DIR or not review.BRAIN_DIR.is_dir():
+        print(f"no brain at {review.BRAIN_DIR}")
+        return 2
+    if args.brain_undo:
+        print(f"restored {brain_undo(store, args.brain_undo, args.date)}")
+        return 0
+    review.git("fetch", "--quiet", "origin", f"+{review.BASE_BRANCH}:refs/remotes/origin/{review.BASE_BRANCH}")
+    head = review.git("rev-parse", f"origin/{review.BASE_BRANCH}").strip()
+    if not args.dry_run and not act.claude_ready():
+        print(f"no Claude token: {act.claude_auth.state()[1]}")
+        return 2
+    brain_run.backfill(store, review.BRAIN_DIR, head, args.dry_run, args.budget_usd,
+                       [s for s in (args.only or "").split(",") if s])
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--once", action="store_true")
+    ap.add_argument("--brain-backfill", action="store_true", help="bring reference leaves up to master")
+    ap.add_argument("--dry-run", action="store_true", help="with --brain-backfill: list and estimate only")
+    ap.add_argument("--budget-usd", type=float, default=5.0, help="with --brain-backfill: stop at this spend")
+    ap.add_argument("--only", help="with --brain-backfill: comma-separated leaf slugs")
+    ap.add_argument("--brain-undo", metavar="FOLDER/SLUG", help="restore a refreshed leaf's backup")
+    ap.add_argument("--date", help="with --brain-undo: the backup day, YYYY-MM-DD (default newest)")
     args = ap.parse_args()
     act.OUT.mkdir(parents=True, exist_ok=True)
     store = Store(DB)
     brain.log_event = lambda msg: log(f"brain: {msg}")
+    if args.brain_backfill or args.brain_undo:
+        return brain_command(store, args)
     me = fetch.gh("api", "user", "--jq", ".login").strip()
     log(f"start as {me}: interval {INTERVAL}s, caps {DAILY_CAP}/day {PER_PR_CAP}/PR/day, "
         f"approvals {'enabled' if ALLOW_APPROVE else 'off (comments only)'}, "

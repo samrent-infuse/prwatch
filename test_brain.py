@@ -364,6 +364,56 @@ class Refresh(RepoCase):
         self.assertIn("current/", c.call_args.args[0])
 
 
+class Backfill(RepoCase):
+    def setUp(self):
+        super().setUp()
+        import review
+        mock.patch.object(review, "WORK", self.vault.parent / "work").start()
+        self.git("checkout", "-q", "main")
+        files = {"inkhub_ai/x.py": "1\n", "inkhub_crawling/y.py": "1\n", "inkhub_processing/z.py": "1\n"}
+        self.commit(files, "packages", "2026-05-01T12:00:00Z")  # dates stay monotone along history
+        self.head = self.commit({k: "2\n" for k in files}, "change packages (#20)", "2026-05-02T10:00:00Z")
+        self.git("update-ref", f"refs/remotes/origin/{review.BASE_BRANCH}", self.head)
+        for slug, as_of, body in (("ref-ai", "2026-04-20", "inkhub_ai/x.py"),
+                                  ("ref-crawl", "2026-04-20", "inkhub_crawling/y.py"),
+                                  ("ref-proc", "2026-04-20", "inkhub_processing/z.py"),
+                                  ("ref-same", "2026-04-20", "inkhub_platform/api/other.py"),
+                                  ("ref-undated", "undated", "inkhub_platform/api/routes.py"),
+                                  ("ref-nopath", "2026-04-20", "no code named here")):
+            (self.vault / "reference" / f"{slug}.md").write_text(leaf_text("reference", as_of, "current", body))
+
+    def snapshot(self):
+        return {p: p.read_bytes() for p in self.vault.rglob("*.md")}
+
+    def test_dry_run_lists_actions_and_writes_nothing(self):
+        before = self.snapshot()
+        rows = brain_run.backfill(self.store, self.vault, self.head, dry_run=True, budget_usd=5, only=[])
+        actions = {r["slug"]: r["action"] for r in rows}
+        self.assertEqual({k: actions[k] for k in ("ref-b", "ref-same", "ref-undated", "ref-nopath", "ref-ai")},
+                         {"ref-b": "refresh", "ref-same": "sync only", "ref-undated": "verify",
+                          "ref-nopath": "not anchored to code", "ref-ai": "refresh"})
+        self.assertGreater(sum(r["est_usd"] for r in rows), 0)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.store.brain_rows(), [])
+
+    def fake_refresh_costing(self, cost):
+        def fake(store, vault, group, head, kind="brain_refresh", verify=False):
+            store.end_call(store.start_call(0, kind, "sonnet", head, "x"), "ok", {"cost_usd": cost})
+            return "1 edited"
+        return fake
+
+    def test_real_run_records_sync_points_and_stops_at_budget(self):
+        with mock.patch.object(brain_run, "refresh", side_effect=self.fake_refresh_costing(3.0)) as r:
+            brain_run.backfill(self.store, self.vault, self.head, dry_run=False, budget_usd=5, only=[])
+        self.assertEqual(r.call_count, 2)  # 3.0, then 6.0 >= 5 stops before the third batch
+        self.assertEqual(self.store_row("ref-same")["sync_sha"], self.head)
+        self.assertEqual(r.call_args.kwargs.get("kind"), "brain_backfill")
+
+    def test_only_limits_to_named_leaves(self):
+        rows = brain_run.backfill(self.store, self.vault, self.head, dry_run=True, budget_usd=5, only=["ref-b"])
+        self.assertEqual([r["slug"] for r in rows], ["ref-b"])
+
+
 class Step(VaultCase):
     def setUp(self):
         super().setUp()
@@ -406,6 +456,18 @@ class Step(VaultCase):
             self.main.brain_step(self.store, model_call_made=False)
         r.assert_called_once()
         self.assertEqual(r.call_args.args[2:4], (["leaf"], "h2"))
+
+    def test_undo_command_restores_marks_stuck_and_logs(self):
+        import review
+        leaf = {l.slug: l for l in brain.build_index(self.vault)}["ref-b"]
+        brain.apply(leaf, [{"old": "port 5432", "new": "port 6432"}], leaf.path.stat().st_mtime, [1], "a" * 40,
+                    self.vault.parent / "here" / "brain-backups", "2026-10-28")
+        self.store.brain_upsert("ref-b", path="reference/ref-b.md", state="ok")
+        with mock.patch.object(review, "HERE", self.vault.parent / "here"):
+            self.main.brain_undo(self.store, "reference/ref-b", None)
+        self.assertIn("port 5432", leaf.path.read_text())
+        self.assertEqual(self.store.brain_row("ref-b")["state"], "stuck")
+        self.assertIn("[[ref-b]] undone by hand", (self.vault / "handoff" / "brain-refresh-log.md").read_text())
 
     def test_log_counts_today(self):
         brain.log(self.vault, "2026-10-28T10:00:00Z [[a]] edited (1 edits) from #1")

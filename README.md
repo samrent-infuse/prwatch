@@ -85,6 +85,13 @@ Hold labels and infra paths (never approved automatically) are `HOLD_LABELS` and
   tokens and list-price cost today, posts waiting, stuck jobs, Claude token state.
 - Spend: every call's tokens (input, output, cache read, cache write) and claude's list-price cost are in the
   `calls` table; today's totals are in `status.json` (`usage_today`) and each review's log line.
+- Brain refresh (`PRWATCH_BRAIN_REFRESH=1`, mount rw): when master moves, each reference leaf whose named repo
+  files changed is due; after `PRWATCH_BRAIN_SETTLE_MIN` quiet minutes one `PRWATCH_BRAIN_MODEL` call per package
+  group (up to 6 leaves) returns edits; code applies them (exact match once, frontmatter kept, no shrink past 40%,
+  untouched since read), backs the old leaf up to `brain-backups/`, and logs to `handoff/brain-refresh-log.md`.
+  Only in ticks without a review call. Backfill: `docker exec prwatch-prwatch-1 python3 main.py --brain-backfill
+  --dry-run`, then without `--dry-run` and with `--budget-usd N` (default 5) and optionally `--only a,b`. Undo:
+  `--brain-undo reference/<slug> [--date YYYY-MM-DD]` (the leaf then stays out of automatic refreshes).
 - Ledger: `docker exec prwatch-prwatch-1 python3 -c "import sqlite3;print(sqlite3.connect('/data/state.db').execute('select * from calls').fetchall())"`
 - Turn approvals or change requests off: `PRWATCH_ALLOW_APPROVE=0` or `PRWATCH_ALLOW_REQUEST_CHANGES=0` in
   prwatch.env, re-run the start command.

@@ -205,7 +205,7 @@ def refresh(store, vault, group, head, kind="brain_refresh", verify=False):
     """One refresh call for `group` against master at `head`, then code applies the result. Returns a
     one-line outcome. `verify` (the backfill's undated leaves) sends current files instead of a diff."""
     slugs = ", ".join(l.slug for l in group)
-    wt, inputs = review.WORK / f"brain-wt-{head[:7]}", review.WORK / f"brain-in-{head[:7]}"
+    wt, inputs = review.WORK / f"{kind}-wt-{head[:7]}", review.WORK / f"{kind}-in-{head[:7]}"  # backfill may run beside the loop
     review.cleanup(wt, inputs)
     inputs.mkdir(parents=True)
     review.git("worktree", "add", "--detach", str(wt), head)
@@ -264,3 +264,87 @@ def _apply_result(store, vault, group, head, result, mtimes, prs, kind):
     for s in result.get("suggestions") or []:
         brain.log(vault, f"{now} suggestion ({s.get('kind')}) [[{s.get('slug', '')}]]: {brain.plain(s.get('text', ''))}")
     return ", ".join(f"{v} {k}" for k, v in done.items() if v) or "nothing to apply"
+
+
+EST_DEFAULT_USD = 0.45  # per call, until the ledger holds ten brain calls
+
+
+def _est_per_call(store):
+    costs = [r[0] for r in store.db.execute(
+        "SELECT cost_usd FROM calls WHERE kind LIKE 'brain_%' AND cost_usd IS NOT NULL").fetchall()]
+    return sum(costs) / len(costs) if len(costs) >= 10 else EST_DEFAULT_USD
+
+
+def _batches(rows, leaves, action):
+    """Rows of one action grouped by shared top-level package, up to 6 per batch, most lines first."""
+    pending = sorted((r for r in rows if r["action"] == action), key=lambda r: -r["lines"])
+    out = []
+    while pending:
+        first = pending.pop(0)
+        pk = {p.split("/", 1)[0] for p in leaves[first["slug"]].repo_paths}
+        batch = [first] + [r for r in pending if {p.split("/", 1)[0] for p in leaves[r["slug"]].repo_paths} & pk][:5]
+        pending = [r for r in pending if r not in batch]
+        out.append(batch)
+    return out
+
+
+def backfill(store, vault, head, dry_run, budget_usd, only):
+    """Bring every reference leaf that names repo files up to `head`. Returns one row per leaf: slug, as_of,
+    anchor, files, lines, batch, action (sync only | refresh | verify | not anchored to code), est_usd.
+    A dry run writes nothing. A real run records the free sync points first, then runs the refresh batches
+    (most changed lines first) and the verify batches, and stops once this run's spend reaches budget_usd."""
+    index = [l for l in brain.build_index(vault) if l.folder == "reference" and (not only or l.slug in only)]
+    leaves = {l.slug: l for l in index}
+    rows = []
+    for leaf in index:
+        row = {"slug": leaf.slug, "as_of": leaf.as_of, "anchor": "", "files": 0, "lines": 0, "batch": 0,
+               "est_usd": 0.0}
+        if not leaf.repo_paths:
+            rows.append({**row, "action": "not anchored to code"})
+            continue
+        known = store.brain_row(leaf.slug)
+        sync = known["sync_sha"] if known is not None and _is_commit(known["sync_sha"]) else anchor(leaf.as_of)
+        changed = changed_named_files(sync, head, leaf.repo_paths) if sync else None
+        if changed is None:
+            rows.append({**row, "action": "verify"})
+        elif not changed:
+            rows.append({**row, "anchor": sync, "action": "sync only"})
+        else:
+            stat = review.git("diff", "--numstat", sync, head, "--", *leaf.repo_paths).splitlines()
+            lines = sum(int(a) + int(d) for a, d, *_ in (s.split("\t") for s in stat) if a.isdigit() and d.isdigit())
+            rows.append({**row, "anchor": sync, "files": len(changed), "lines": lines, "action": "refresh"})
+    per_call = _est_per_call(store)
+    batches = _batches(rows, leaves, "refresh") + _batches(rows, leaves, "verify")
+    for i, batch in enumerate(batches, 1):
+        for r in batch:
+            r["batch"], r["est_usd"] = i, per_call / len(batch)
+    _print(rows, batches)
+    if dry_run:
+        return rows
+    now = stamp()
+    for r in rows:
+        if r["action"] == "sync only":
+            store.brain_upsert(r["slug"], path=f"reference/{r['slug']}.md", sync_sha=head, synced_at=now, state="ok")
+        elif r["action"] == "refresh":
+            store.brain_upsert(r["slug"], path=f"reference/{r['slug']}.md", sync_sha=r["anchor"], state="due",
+                               touched_at=now)
+    start = store.db.execute("SELECT COALESCE(MAX(id), 0) FROM calls").fetchone()[0]
+    for batch in batches:
+        spent = store.db.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM calls WHERE kind='brain_backfill' AND id>?",
+                                 (start,)).fetchone()[0]
+        if spent >= budget_usd:
+            print(f"budget reached: ${spent:.2f} of ${budget_usd:.2f}; run again to continue")
+            break
+        group = [leaves[r["slug"]] for r in batch]
+        outcome = refresh(store, vault, group, head, kind="brain_backfill", verify=batch[0]["action"] == "verify")
+        print(f"batch {batch[0]['batch']} ({', '.join(l.slug for l in group)}): {outcome}")
+    return rows
+
+
+def _print(rows, batches):
+    print(f"{'leaf':40} {'as_of':10} {'anchor':7} {'files':>5} {'lines':>6} {'batch':>5} {'est $':>6}  action")
+    for r in sorted(rows, key=lambda r: (r["batch"] or 999, -r["lines"])):
+        print(f"{r['slug'][:40]:40} {r['as_of'][:10]:10} {r['anchor'][:7]:7} {r['files']:>5} {r['lines']:>6} "
+              f"{r['batch'] or '':>5} {r['est_usd']:>6.2f}  {r['action']}")
+    print(f"{len(batches)} calls, about ${sum(r['est_usd'] for r in rows):.2f} at list price; "
+          f"{sum(r['action'] == 'sync only' for r in rows)} leaves sync only (free)")
