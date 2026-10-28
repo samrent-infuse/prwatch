@@ -1,0 +1,29 @@
+# PR watcher on Docker Desktop. Start (Git Bash, from this folder):
+#   GH_TOKEN=$(gh auth token) docker compose up -d --build
+# Settings (repo, logins, reviewer, caps, approvals) are in prwatch.env: copy prwatch.env.example.
+# Model calls use the long-lived token in claude.env (written by set-token.ps1 from `claude setup-token`);
+# without it they fall back to the desktop's Claude Code login (read-only mount, see claude_auth.py).
+name: prwatch
+services:
+  prwatch:
+    build: .
+    image: prwatch:local
+    restart: unless-stopped
+    environment:
+      GH_TOKEN: ${GH_TOKEN:?run with GH_TOKEN=$(gh auth token)}
+      PRWATCH_INTERVAL: "180"
+      PRWATCH_DRY_RUN: ${PRWATCH_DRY_RUN:-0}
+    env_file:
+      - path: prwatch.env
+        required: true
+      - path: claude.env
+        required: false
+    volumes:
+      - ..:/inkhub                       # the parent folder: STOP, reviews/, this folder's logs
+      - ${USERPROFILE}/.claude/plugins/cache/superpowers-marketplace/superpowers/6.4.2/skills:/skills:ro
+      - ${USERPROFILE}/.claude/.credentials.json:/host-claude/credentials.json:ro   # desktop login; read, never refreshed here
+      - state:/data                      # SQLite stays off the Windows bind mount
+      - repo:/repo
+volumes:
+  state:
+  repo:

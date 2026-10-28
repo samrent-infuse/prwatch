@@ -1,0 +1,13 @@
+# secrets and local settings
+claude.env
+prwatch.env
+*.env
+!prwatch.env.example
+# runtime output
+*.log
+status.json
+heartbeat.txt
+pins.txt
+drafts/
+*.tmp
+__pycache__/

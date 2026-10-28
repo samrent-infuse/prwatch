@@ -1,0 +1,31 @@
+# Save a long-lived Claude token for prwatch and restart the container.
+#   1. In any terminal: claude setup-token. It opens a browser sign-in. The page then shows a CODE
+#      (it contains '#'): paste that code back into the same terminal. The terminal then prints the
+#      TOKEN (sk-ant-oat01-...). That token is what this script wants.
+#   2. Here: powershell -ExecutionPolicy Bypass -File $HOME\.claude\inkhub\prwatch\set-token.ps1
+# The token is read hidden, tried with one tiny Haiku call in the prwatch image, and written to
+# claude.env only if that call works. It is never echoed or put on a command line.
+$ErrorActionPreference = "Stop"
+$secure = Read-Host "Paste the token from 'claude setup-token'" -AsSecureString
+$token = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)) -replace '\s', ''
+if ($token -match '#') {
+    throw "This is the browser sign-in code ($($token.Length) characters, contains '#'). Paste it into the terminal where 'claude setup-token' is waiting; it then prints the token. Nothing written."
+}
+Write-Host "Trying the token with one Haiku call ($($token.Length) characters)..."
+$env:CLAUDE_CODE_OAUTH_TOKEN = $token
+try {
+    $out = docker run --rm -e CLAUDE_CODE_OAUTH_TOKEN --entrypoint claude prwatch:local -p "Reply with OK" --model haiku 2>&1 | Out-String
+    $ok = $LASTEXITCODE -eq 0
+} finally { Remove-Item Env:CLAUDE_CODE_OAUTH_TOKEN }
+if (-not $ok) { throw "Claude refused this token, nothing written: $($out.Trim())" }
+$envFile = Join-Path $PSScriptRoot "claude.env"
+[IO.File]::WriteAllText($envFile, "CLAUDE_CODE_OAUTH_TOKEN=$token`n", (New-Object Text.UTF8Encoding $false))
+Remove-Variable token, secure
+Write-Host "Token works; saved $envFile"
+$ghUser = (Select-String -Path (Join-Path $PSScriptRoot "prwatch.env") -Pattern '^PRWATCH_GH_USER=(\S+)' |
+           Select-Object -First 1).Matches.Groups[1].Value
+$env:GH_TOKEN = if ($ghUser) { gh auth token -u $ghUser } else { gh auth token }
+Push-Location $PSScriptRoot
+try { docker compose up -d --force-recreate } finally { Pop-Location; Remove-Item Env:GH_TOKEN }
+Start-Sleep 20
+docker logs --tail 1 prwatch-prwatch-1
