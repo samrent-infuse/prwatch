@@ -33,6 +33,8 @@ PER_PR_CAP = int(os.environ.get("PRWATCH_PER_PR_CAP", "2"))
 INTERVAL = int(os.environ.get("PRWATCH_INTERVAL", "180"))
 DRY = os.environ.get("PRWATCH_DRY_RUN") == "1"
 ALLOW_APPROVE = os.environ.get("PRWATCH_ALLOW_APPROVE") == "1"
+ALLOW_REQUEST_CHANGES = os.environ.get("PRWATCH_ALLOW_REQUEST_CHANGES") == "1"
+WAIT_RECHECK_MIN = 1  # an approval waiting for CI looks again after this long
 MODEL_RETRY_MIN = (10, 30)  # after the 3rd failed model run the job is stuck
 DB = os.environ.get("PRWATCH_DB", "/data/state.db")
 LOG = act.OUT / "prwatch.log"
@@ -54,7 +56,7 @@ def usage_note(u):
     if not u or u.get("cost_usd") is None:
         return ""
     return (f"; {u['in_tokens'] + u['cache_read'] + u['cache_write']:,} in / {u['out_tokens']:,} out tokens, "
-            f"${u['cost_usd']:.2f} list")
+            f"${u['cost_usd']:.2f} list" + (f", reviewer {u['reviewer']}" if u.get("reviewer") else ""))
 
 
 def pins():
@@ -148,7 +150,12 @@ def drain_posts(store):
         if not due(job["next_try_at"]):
             continue
         outcome, detail, rid = post.post(job["pr"], job["head"], job["key"], json.loads(job["verdict_json"]),
-                                         ALLOW_APPROVE)
+                                         ALLOW_APPROVE, ALLOW_REQUEST_CHANGES)
+        if outcome == "wait":  # not a failure: no retry counted, logged when the reason changes
+            store.upsert_job(job["key"], last_error=detail, next_try_at=later(WAIT_RECHECK_MIN))
+            if detail != job["last_error"]:
+                log(f"#{job['pr']} post at {job['head'][:7]}: {detail}")
+            continue
         tries = job["post_tries"] + (outcome == "retry")
         if outcome == "retry" and tries > len(post.POST_BACKOFF_MIN):
             outcome, detail = "stuck", f"out of post retries: {detail}"
@@ -199,6 +206,10 @@ def handle_pr(store, snap, pinned, me):
             continue
         if a.kind == "skip":
             row.skipped_head = a.head
+        elif a.kind == "cap_comment":
+            act.cap_comment(a.pr, int(a.reason.split()[0]))
+            row.cap_commented = 1
+            log(f"#{a.pr} change-round cap: commented, automatic re-reviews stop ({a.reason})", notify=True)
         elif a.kind == "request_reviewer":
             act.request_reviewer(a.pr)
             row.last_rerequest_head = a.head
@@ -253,7 +264,7 @@ def tick(store, me):
 def write_status(store, me, state):
     status = {
         "tick": stamp(), "state": state, "login": me, "interval_s": INTERVAL, "dry_run": DRY,
-        "approve_enabled": ALLOW_APPROVE, "claude_token": act.claude_ready(), "claude_auth": act.claude_auth.state()[1],
+        "approve_enabled": ALLOW_APPROVE, "request_changes_enabled": ALLOW_REQUEST_CHANGES, "claude_token": act.claude_ready(), "claude_auth": act.claude_auth.state()[1],
         "model_calls_today": store.calls_today(), "daily_cap": DAILY_CAP, "usage_today": store.usage_today(),
         "posts_waiting": len(store.jobs_in("post")),
         "stuck": [j["key"] for j in store.jobs_in("stuck")],
@@ -272,6 +283,7 @@ def main():
     me = fetch.gh("api", "user", "--jq", ".login").strip()
     log(f"start as {me}: interval {INTERVAL}s, caps {DAILY_CAP}/day {PER_PR_CAP}/PR/day, "
         f"approvals {'enabled' if ALLOW_APPROVE else 'off (comments only)'}, "
+        f"request changes {'enabled' if ALLOW_REQUEST_CHANGES else 'off'}, "
         f"claude: {act.claude_auth.state()[1]}")
     last_state = ""
     while True:

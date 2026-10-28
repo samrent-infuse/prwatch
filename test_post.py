@@ -3,7 +3,8 @@ import os
 # Before importing decide: identity and policy are read at import time.
 os.environ.update(PRWATCH_ME="me,me-alt", PRWATCH_REVIEWER="reviewer-bot",
                   PRWATCH_REQUIRED_CHECK="scan-verdict", PRWATCH_REPO="example-org/example-repo",
-                  PRWATCH_SETTLE_MIN="30", PRWATCH_SKIP_TITLE="do not review")
+                  PRWATCH_SETTLE_MIN="30", PRWATCH_SKIP_TITLE="do not review",
+                  PRWATCH_MAX_CHANGE_ROUNDS="2")
 
 import json
 import subprocess
@@ -49,6 +50,15 @@ class Render(unittest.TestCase):
             self.assertIn(why, reason)
         important = {**V_OK, "findings": [{"severity": "important", "title": "t", "detail": "d"}]}
         self.assertEqual(render.decide_event(important, PR, set(), True), ("COMMENT", ""))
+        critical = {**V_OK, "findings": [{"severity": "critical", "title": "t", "detail": "d"}]}
+        self.assertEqual(render.decide_event(critical, PR, set(), True, True), ("REQUEST_CHANGES", ""))
+        self.assertEqual(render.decide_event(critical, PR, set(), True, False)[0], "COMMENT")
+        self.assertEqual(render.decide_event(critical, {**PR, "author": "me"}, {"me"}, True, True)[0], "COMMENT")
+        self.assertEqual(render.decide_event(critical, {**PR, "draft": True}, set(), True, True)[0], "COMMENT")
+        # an approval waits for CI that is still running and is withheld when CI failed
+        self.assertEqual(render.decide_event(V_OK, {**PR, "ci": ("pending", "E2E pending")}, set(), True)[0], "WAIT")
+        self.assertEqual(render.decide_event(V_OK, {**PR, "ci": ("failed", "Lint failure")}, set(), True)[0], "COMMENT")
+        self.assertEqual(render.decide_event(important, {**PR, "ci": ("pending", "x")}, set(), True)[0], "COMMENT")
         # the model's verdict word is not consulted: zero critical and important approves
         self.assertEqual(render.decide_event({**V_OK, "verdict": "comment"}, PR, set(), True), ("APPROVE", ""))
 
@@ -122,6 +132,16 @@ class Drain(unittest.TestCase):
         self.drain(("retry", "HTTP 502", None))
         self.assertEqual(self.store.job("review:1:h2")["state"], "stuck")
         self.assertEqual(self.store.calls_today(), 0)
+
+    def test_wait_for_ci_rechecks_without_counting_a_retry(self):
+        self.drain(("wait", "approval waits: CI E2E pending", None))
+        job = self.store.job("review:1:h2")
+        self.assertEqual((job["state"], job["post_tries"]), ("post", 0))
+        self.assertTrue(job["next_try_at"])
+        self.assertEqual(self.logs.call_count, 1)
+        self.store.upsert_job("review:1:h2", next_try_at="")
+        self.drain(("wait", "approval waits: CI E2E pending", None))
+        self.assertEqual(self.logs.call_count, 1)  # same reason: not logged again
 
     def test_not_due_is_left_alone(self):
         self.store.upsert_job("review:1:h2", next_try_at="2999-01-01T00:00:00Z")
@@ -202,6 +222,20 @@ class SamePatch(unittest.TestCase):
         self.assertEqual(review.patch_lines(self.reviewed), [("a.py", "+three")])
         self.assertEqual(review.patch_lines(self.reviewed), review.patch_lines(self.rebased))
         self.assertNotEqual(review.patch_lines(self.reviewed), review.patch_lines(self.edited))
+
+
+class ReviewerModel(unittest.TestCase):
+    def diff(self, path, lines):
+        head = [f"diff --git a/{path} b/{path}", f"--- a/{path}", f"+++ b/{path}", "@@ -1 +1 @@"]
+        return "\n".join(head + ["+x"] * lines) + "\n"
+
+    def test_small_safe_diff_gets_the_small_model(self):
+        with mock.patch.object(review, "REVIEWER_MODEL_SMALL", "sonnet"):
+            self.assertEqual(review.reviewer_model(self.diff("api/a.py", 10))[0], "sonnet")
+            self.assertEqual(review.reviewer_model(self.diff("api/a.py", 401))[0], "opus")
+            self.assertEqual(review.reviewer_model(self.diff("deploy/x.tf", 3))[0], "opus")
+            self.assertEqual(review.reviewer_model(self.diff("svc/main.py", 3))[0], "opus")
+        self.assertEqual(review.reviewer_model(self.diff("api/a.py", 10))[0], "opus")  # unset = always Opus
 
 
 class CarriedVerdict(unittest.TestCase):

@@ -9,6 +9,7 @@ environment holding only the Claude token, and returns a JSON verdict validated 
 import datetime
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -27,7 +28,13 @@ PROJECT_CONTEXT = HERE / "project-context.md"  # what a reviewer must know about
 RUNS = HERE / "runs"                           # claude's JSON result of every run, kept RUNS_KEEP_DAYS
 RUNS_KEEP_DAYS = 14
 BASE_BRANCH = os.environ.get("PRWATCH_BASE_BRANCH", "main")
-MODEL, EFFORT = "opus", "high"  # reviews run on Opus at high effort
+MODEL, EFFORT = "opus", "high"  # the run itself; its reviewer subagent is reviewer_model()
+# The reviewer subagent runs on REVIEWER_MODEL_SMALL instead of MODEL when the diff it reads has at most
+# SMALL_PR_MAX_LINES added plus removed lines and no changed path matches RISKY_PATHS. Empty = always MODEL.
+REVIEWER_MODEL_SMALL = os.environ.get("PRWATCH_REVIEWER_MODEL_SMALL", "").strip()
+SMALL_PR_MAX_LINES = int(os.environ.get("PRWATCH_SMALL_PR_MAX_LINES", "400") or 0)
+RISKY_PATHS = re.compile(os.environ.get(
+    "PRWATCH_RISKY_PATHS", r"^deploy/|^\.github/workflows/|schema\.sql$|/migrations?/|/main\.py$"))
 TIMEOUT_S = 1800
 # claude stops a run at this spend (its own list-price estimate); 0 = no limit.
 MAX_RUN_USD = float(os.environ.get("PRWATCH_MAX_RUN_USD", "0") or 0)
@@ -51,7 +58,7 @@ read {skill}/SKILL.md and its template {skill}/code-reviewer.md, and follow them
   (not the whole diff: that is the reviewer's job), and write three to eight questions this review must
   settle: what could break in production, what the description promises that the diff may not deliver, what
   the project context flags for these files. Phrase them as questions, never as your conclusions.
-- Dispatch exactly one reviewer subagent with model "opus" and effort "high". Give it the paths above, the
+- Dispatch exactly one reviewer subagent with model "{reviewer}" and effort "high". Give it the paths above, the
   project context, your questions (to answer each with the line it checked), and these working rules:
   every tool call re-sends its whole context, so aim for about 25 tool calls and stop at 40; read input.diff
   in slices of 300 to 600 lines and a whole function per read; stay within this PR; verify each finding
@@ -184,6 +191,17 @@ def usage_of(out):
     return u
 
 
+def reviewer_model(diff):
+    """(model, why) for the reviewer subagent, from the diff it will read."""
+    lines = sum(1 for l in diff.splitlines() if l[:1] in "+-" and not l.startswith(("+++ ", "--- ")))
+    paths = [l[6:] for l in diff.splitlines() if l.startswith("+++ b/")]
+    paths += [l[6:] for l in diff.splitlines() if l.startswith("--- a/")]
+    risky = next((p for p in paths if RISKY_PATHS.search(p)), "")
+    if REVIEWER_MODEL_SMALL and lines <= SMALL_PR_MAX_LINES and not risky:
+        return REVIEWER_MODEL_SMALL, f"{lines} lines"
+    return MODEL, f"{lines} lines" + (f", touches {risky}" if risky else "")
+
+
 def budget_args():
     return ["--max-budget-usd", f"{MAX_RUN_USD:g}"] if MAX_RUN_USD > 0 else []
 
@@ -205,6 +223,7 @@ def keep_run(name, text):
 def run(n, head, base_prev="", prev_body=""):
     """Return (verdict dict or None, error text, base used, usage dict or None)."""
     wt, inputs, base, rereview, moved = prepare(n, head, base_prev, prev_body)
+    reviewer, _ = reviewer_model((inputs / "input.diff").read_text(encoding="utf-8"))
     try:
         notes = "".join(note for name, note in (
             ("project-context.md", ", project-context.md (what a reviewer must know about this repository)"),
@@ -214,7 +233,7 @@ def run(n, head, base_prev="", prev_body=""):
         prompt = PROMPT.format(
             n=n, repo=REPO, skill=SKILL_DIR, inputs=inputs, base=base, head=head, notes=notes,
             range_note=BASE_MOVED.format(branch=BASE_BRANCH) if moved else "",
-            rereview=REREVIEW if rereview else "")
+            rereview=REREVIEW if rereview else "", reviewer=reviewer)
         p = subprocess.run(
             ["claude", "-p", prompt, "--model", MODEL, "--effort", EFFORT, *LEAN_ARGS,
              # --tools limits what exists; dontAsk then denies anything not in --allowedTools,
@@ -230,7 +249,7 @@ def run(n, head, base_prev="", prev_body=""):
             out = json.loads(p.stdout)
         except json.JSONDecodeError:
             return None, f"exit {p.returncode}, no JSON: {(p.stderr or p.stdout).strip()[:200]}", base, None
-        usage = usage_of(out)
+        usage = {**usage_of(out), "reviewer": reviewer}
         if out.get("is_error") or out.get("subtype") != "success":
             return None, f"claude {out.get('subtype')}: {str(out.get('result'))[:200]}", base, usage
         v, why = render.validate(out.get("structured_output"))

@@ -50,14 +50,23 @@ def counts(v):
     return {s: sum(1 for f in v["findings"] if f["severity"] == s) for s in SEVERITIES}
 
 
-def decide_event(v, pr, me_logins, allow_approve):
-    """(event, withheld_reason). APPROVE when code counts zero critical and important findings AND
-    the PR is open, ready, unheld, touches no infra and is not mine. The model's own verdict word is
-    not consulted: only the counted findings decide."""
+def decide_event(v, pr, me_logins, allow_approve, allow_request_changes=False):
+    """(event, withheld_reason). The model's own verdict word is not consulted: only the counted findings
+    decide. REQUEST_CHANGES on any critical finding (not on my PR or a draft, and only when enabled).
+    COMMENT on important findings. APPROVE on neither, when the PR is ready, unheld, touches no infra, is
+    not mine and its CI has cleared; WAIT while that CI is still running, COMMENT when it failed."""
     if pr["merged_at_head"]:
         return "COMMENT", "merged before the review finished"
     c = counts(v)
-    if c["critical"] or c["important"]:
+    if c["critical"]:
+        if pr["author"] in me_logins:
+            return "COMMENT", "own PR"
+        if pr["draft"]:
+            return "COMMENT", "draft"
+        if not allow_request_changes:
+            return "COMMENT", "request changes not enabled (PRWATCH_ALLOW_REQUEST_CHANGES)"
+        return "REQUEST_CHANGES", ""
+    if c["important"]:
         return "COMMENT", ""
     if pr["author"] in me_logins:
         return "COMMENT", "own PR"
@@ -70,6 +79,11 @@ def decide_event(v, pr, me_logins, allow_approve):
         return "COMMENT", f"infra path {infra[0]}"
     if not allow_approve:
         return "COMMENT", "container approvals not enabled (PRWATCH_ALLOW_APPROVE)"
+    ci, why = pr.get("ci", ("cleared", ""))
+    if ci == "pending":
+        return "WAIT", f"CI {why}"
+    if ci == "failed":
+        return "COMMENT", f"CI {why}"
     return "APPROVE", ""
 
 

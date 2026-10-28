@@ -11,8 +11,9 @@ import subprocess
 import tempfile
 
 import render
+import decide
 from decide import ME
-from fetch import REPO, AuthBroken, gh
+from fetch import REPO, AuthBroken, check_list, gh
 
 POST_BACKOFF_MIN = (2, 10, 30, 60)
 
@@ -37,12 +38,13 @@ def _api(*args):
 
 def pr_facts(n, head):
     pr = json.loads(gh("pr", "view", str(n), "--repo", REPO, "--json",
-                       "state,isDraft,headRefOid,labels,files,author"))
+                       "state,isDraft,headRefOid,labels,files,author,statusCheckRollup"))
     return {
         "state": pr["state"], "head": pr["headRefOid"], "draft": pr["isDraft"],
         "author": pr["author"]["login"], "labels": [l["name"].lower() for l in pr["labels"]],
         "files": [f["path"] for f in pr["files"]],
         "merged_at_head": pr["state"] == "MERGED" and pr["headRefOid"] == head,
+        "ci": decide.ci_status(check_list(pr.get("statusCheckRollup") or [])),
     }
 
 
@@ -56,8 +58,9 @@ def existing_review(n, head, key):
     return None
 
 
-def post(n, head, key, verdict, allow_approve):
-    """Return (outcome, detail, review_id). Raises AuthBroken on 401/403."""
+def post(n, head, key, verdict, allow_approve, allow_request_changes=False):
+    """Return (outcome, detail, review_id); outcome "wait" means an approval waits for CI.
+    Raises AuthBroken on 401/403."""
     pr = pr_facts(n, head)
     if pr["state"] == "CLOSED":
         return "dropped", "closed unmerged", None
@@ -66,7 +69,9 @@ def post(n, head, key, verdict, allow_approve):
     rid = existing_review(n, head, key)
     if rid:
         return "posted", "already on GitHub", rid
-    event, why = render.decide_event(verdict, pr, ME, allow_approve)
+    event, why = render.decide_event(verdict, pr, ME, allow_approve, allow_request_changes)
+    if event == "WAIT":
+        return "wait", f"approval waits: {why}", None
     payload = {"commit_id": head, "event": event, "body": render.body(verdict, head, key)}
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as fh:
         json.dump(payload, fh)
@@ -78,4 +83,4 @@ def post(n, head, key, verdict, allow_approve):
     status, back, err = _api(f"repos/{REPO}/pulls/{n}/reviews/{data['id']}")
     if status != 200 or render.marker(key) not in ((back or {}).get("body") or ""):
         return "retry", f"read-back HTTP {status or 'no response'}", None  # existing_review finds it next time
-    return "posted", f"{event}" + (f" (approval withheld: {why})" if why else ""), data["id"]
+    return "posted", f"{event}" + (f" ({why})" if why else ""), data["id"]

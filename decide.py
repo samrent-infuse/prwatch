@@ -21,6 +21,9 @@ REQUIRED_CHECK = os.environ.get("PRWATCH_REQUIRED_CHECK", "").strip()
 SETTLE_MIN = int(os.environ.get("PRWATCH_SETTLE_MIN", "0") or 0)
 # A PR whose title contains one of these (comma separated, any case) is ignored completely.
 SKIP_TITLE = [x.strip().lower() for x in os.environ.get("PRWATCH_SKIP_TITLE", "").split(",") if x.strip()]
+# After this many change requests from me on one PR, new commits no longer start a re-review: the author
+# gets one comment, and a re-request of my review still works. 0 = no limit.
+MAX_CHANGE_ROUNDS = int(os.environ.get("PRWATCH_MAX_CHANGE_ROUNDS", "0") or 0)
 # A push touching only these gets no model call; the earlier verdict is not carried over.
 TRIVIAL_PATH = re.compile(r"(^docs/|\.md$|\.txt$|\.rst$)")
 MODEL_KINDS = {"review", "rereview", "fix_draft"}
@@ -49,11 +52,12 @@ class Row:
     skipped_head: str = ""
     head_seen: str = ""     # the head prwatch saw last, and when it first saw it (settle time)
     head_seen_at: str = ""
+    cap_commented: int = 0  # 1 once the change-round cap comment is on the PR
 
 
 @dataclass
 class Action:
-    kind: str  # request_reviewer | review | rereview | fix_draft
+    kind: str  # request_reviewer | review | rereview | fix_draft | skip | cap_comment
     pr: int
     head: str
     base: str = ""          # rereview: the head reviewed last time
@@ -61,23 +65,36 @@ class Action:
     reason: str = ""
 
 
-def ci_cleared(checks):
-    """Every check completed and passed. A skip passes only when its reusable job
-    (`<name> / ...`) passed on the same head; REQUIRED_CHECK, when set, must have passed."""
+def ci_status(checks):
+    """("cleared" | "pending" | "failed", why). Cleared: every check completed and passed; a skip passes
+    only when its reusable job (`<name> / ...`) passed on the same head; REQUIRED_CHECK, when set, must
+    have passed. A failed check wins over a pending one."""
     if not checks:
-        return False, "no checks yet"
+        return "pending", "no checks yet"
     passed = {c["name"] for c in checks if c["conclusion"] == "SUCCESS"}
+    pending = ""
     for c in checks:
         if c["status"] != "COMPLETED":
-            return False, f"{c['name']} pending"
-        if c["conclusion"] == "SUCCESS":
+            pending = pending or f"{c['name']} pending"
+        elif c["conclusion"] == "SUCCESS":
             continue
-        if c["conclusion"] == "SKIPPED" and any(p.startswith(c["name"] + " / ") for p in passed):
+        elif c["conclusion"] == "SKIPPED" and any(p.startswith(c["name"] + " / ") for p in passed):
             continue
-        return False, f"{c['name']} {c['conclusion'].lower()}"
+        elif c["conclusion"] == "SKIPPED" and any(o["name"].startswith(c["name"] + " / ") and
+                                                  o["status"] != "COMPLETED" for o in checks):
+            pending = pending or f"{c['name']} / ... pending"  # its reusable job is still running
+        else:
+            return "failed", f"{c['name']} {c['conclusion'].lower()}"
+    if pending:
+        return "pending", pending
     if REQUIRED_CHECK and not any(n.startswith(REQUIRED_CHECK) for n in passed):
-        return False, f"{REQUIRED_CHECK} verdict not posted"
-    return True, "cleared"
+        return "pending", f"{REQUIRED_CHECK} verdict not posted"
+    return "cleared", "cleared"
+
+
+def ci_cleared(checks):
+    state, why = ci_status(checks)
+    return state == "cleared", why
 
 
 def role_of(snap, pins):
@@ -109,11 +126,9 @@ def decide(snap, row, pins=frozenset(), files_since_last=None, head_age_min=None
     if role == "other":
         return role, [], ""
     ok, why = ci_cleared(snap.checks)
-    if not ok:
-        return role, [], f"waiting for CI: {why}"
     if role == "mine":
-        return role, *_decide_mine(snap, row)
-    return role, *_decide_asked(snap, row, pins, files_since_last, head_age_min)
+        return role, *(_decide_mine(snap, row) if ok else ([], f"waiting for CI: {why}"))
+    return role, *_decide_asked(snap, row, pins, files_since_last, head_age_min, ci=(ok, why))
 
 
 def _decide_mine(snap, row):
@@ -134,7 +149,7 @@ def _decide_mine(snap, row):
     return acts, ""
 
 
-def _decide_asked(snap, row, pins, files_since_last, head_age_min=None):
+def _decide_asked(snap, row, pins, files_since_last, head_age_min=None, ci=(True, "")):
     # Done is what GitHub shows (a review of mine on this head), not what was written locally.
     if any(r["author"] in ME and r["commit"] == snap.head for r in snap.reviews):
         return [], ""
@@ -142,15 +157,24 @@ def _decide_asked(snap, row, pins, files_since_last, head_age_min=None):
     if last == snap.head:
         return [], ""
     if not last:
+        # A first review does not wait for CI, so it lands early; an approval still waits for CI at post time.
         if snap.review_requests & ME or snap.number in pins:
             return [Action("review", snap.number, snap.head, reason="review requested")], ""
         return [], ""
+    if not ci[0]:
+        return [], f"waiting for CI: {ci[1]}"
     if snap.head == row.skipped_head:
         return [], ""
     if files_since_last is not None and all(TRIVIAL_PATH.search(f) for f in files_since_last):
         return [Action("skip", snap.number, snap.head, base=last)], (
             f"docs-only push since {last[:7]}; no model call, re-pin to force a review")
     rerequested = bool(snap.review_requests & ME)
+    rounds = sum(1 for r in snap.reviews if r["author"] in ME and r["state"] == "CHANGES_REQUESTED")
+    if MAX_CHANGE_ROUNDS and rounds >= MAX_CHANGE_ROUNDS and not rerequested:
+        note = f"{rounds} change requests: no automatic re-review; re-request my review to get one"
+        if not row.cap_commented:
+            return [Action("cap_comment", snap.number, snap.head, reason=f"{rounds} change requests")], note
+        return [], note
     if SETTLE_MIN and not rerequested and head_age_min is not None and head_age_min < SETTLE_MIN:
         return [], f"settling: re-review once {snap.head[:7]} is {SETTLE_MIN} min old"
     return [Action("rereview", snap.number, snap.head, base=last,

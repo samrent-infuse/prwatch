@@ -50,8 +50,14 @@ def gh(*args, check=True):
 def _checks(node):
     commits = node["commits"]["nodes"]
     rollup = commits[0]["commit"]["statusCheckRollup"] if commits else None
+    return check_list((rollup or {}).get("contexts", {}).get("nodes", []))
+
+
+def check_list(nodes):
+    """CheckRun and StatusContext nodes (GraphQL, or `gh pr view --json statusCheckRollup`) -> dicts of
+    name, status, conclusion (upper case), the shape decide.ci_status reads."""
     out = []
-    for c in (rollup or {}).get("contexts", {}).get("nodes", []):
+    for c in nodes:
         if c["__typename"] == "CheckRun":
             out.append({"name": c["name"], "status": c["status"],
                         "conclusion": (c["conclusion"] or "").upper()})

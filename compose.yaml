@@ -11,7 +11,6 @@ services:
     restart: unless-stopped
     environment:
       GH_TOKEN: ${GH_TOKEN:?run with GH_TOKEN=$(gh auth token)}
-      PRWATCH_INTERVAL: "180"
       PRWATCH_DRY_RUN: ${PRWATCH_DRY_RUN:-0}
     env_file:
       - path: prwatch.env

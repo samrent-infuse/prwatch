@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS prs (
   skipped_head TEXT NOT NULL DEFAULT '',
   last_note TEXT NOT NULL DEFAULT '',
   head_seen TEXT NOT NULL DEFAULT '',
-  head_seen_at TEXT NOT NULL DEFAULT ''
+  head_seen_at TEXT NOT NULL DEFAULT '',
+  cap_commented INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS calls (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,9 +74,10 @@ class Store:
             if col not in have:  # databases created before the usage columns
                 self.db.execute(f"ALTER TABLE calls ADD COLUMN {col} {typ}")
         have = {r[1] for r in self.db.execute("PRAGMA table_info(prs)")}
-        for col in ("head_seen", "head_seen_at"):
-            if col not in have:  # databases created before the settle time
-                self.db.execute(f"ALTER TABLE prs ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+        for col, typ in (("head_seen", "TEXT NOT NULL DEFAULT ''"), ("head_seen_at", "TEXT NOT NULL DEFAULT ''"),
+                         ("cap_commented", "INTEGER NOT NULL DEFAULT 0")):
+            if col not in have:  # databases created before these columns
+                self.db.execute(f"ALTER TABLE prs ADD COLUMN {col} {typ}")
         self.db.commit()
 
     def row(self, n):
@@ -83,19 +85,20 @@ class Store:
         if not r:
             return Row(), ""
         return Row(r["role"], r["last_reviewed_head"], r["last_rerequest_head"],
-                   r["last_fix_review_id"], r["skipped_head"], r["head_seen"], r["head_seen_at"]), r["last_note"]
+                   r["last_fix_review_id"], r["skipped_head"], r["head_seen"], r["head_seen_at"], r["cap_commented"]), r["last_note"]
 
     def save(self, n, row, note):
         self.db.execute(
             "INSERT INTO prs (number, role, last_reviewed_head, last_rerequest_head, last_fix_review_id, "
-            "skipped_head, last_note, head_seen, head_seen_at) VALUES (?,?,?,?,?,?,?,?,?) "
+            "skipped_head, last_note, head_seen, head_seen_at, cap_commented) VALUES (?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(number) DO UPDATE SET "
             "role=excluded.role, last_reviewed_head=excluded.last_reviewed_head, "
             "last_rerequest_head=excluded.last_rerequest_head, "
             "last_fix_review_id=excluded.last_fix_review_id, skipped_head=excluded.skipped_head, "
-            "last_note=excluded.last_note, head_seen=excluded.head_seen, head_seen_at=excluded.head_seen_at",
+            "last_note=excluded.last_note, head_seen=excluded.head_seen, head_seen_at=excluded.head_seen_at, "
+            "cap_commented=excluded.cap_commented",
             (n, row.role, row.last_reviewed_head, row.last_rerequest_head,
-             row.last_fix_review_id, row.skipped_head, note, row.head_seen, row.head_seen_at))
+             row.last_fix_review_id, row.skipped_head, note, row.head_seen, row.head_seen_at, row.cap_commented))
         self.db.commit()
 
     def calls_today(self, pr=None):

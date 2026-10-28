@@ -3,7 +3,8 @@ import os
 # Before importing decide: identity and policy are read at import time.
 os.environ.update(PRWATCH_ME="me,me-alt", PRWATCH_REVIEWER="reviewer-bot",
                   PRWATCH_REQUIRED_CHECK="scan-verdict", PRWATCH_REPO="example-org/example-repo",
-                  PRWATCH_SETTLE_MIN="30", PRWATCH_SKIP_TITLE="do not review")
+                  PRWATCH_SETTLE_MIN="30", PRWATCH_SKIP_TITLE="do not review",
+                  PRWATCH_MAX_CHANGE_ROUNDS="2")
 
 import unittest
 
@@ -57,11 +58,37 @@ class Asked(unittest.TestCase):
         self.assertEqual(role, "asked")
         self.assertEqual([a.kind for a in acts], ["review"])
 
-    def test_requested_but_ci_red_waits(self):
+    def test_first_review_does_not_wait_for_ci(self):
         s = snap(review_requests={"me"}, checks=GREEN[:3])
-        role, acts, note = d.decide(s, d.Row())
+        self.assertEqual([a.kind for a in d.decide(s, d.Row())[1]], ["review"])
+
+    def test_rereview_waits_for_ci(self):
+        s = snap(reviews=[review("me", "COMMENTED", "h1")], checks=GREEN[:3])
+        _, acts, note = d.decide(s, d.Row(), files_since_last=["api/x.py"])
         self.assertEqual(acts, [])
         self.assertTrue(note.startswith("waiting for CI"))
+
+    def test_ci_status_failed_wins_over_pending(self):
+        pending = {"name": "E2E", "status": "IN_PROGRESS", "conclusion": ""}
+        failed = {"name": "Lint", "status": "COMPLETED", "conclusion": "FAILURE"}
+        self.assertEqual(d.ci_status([pending, failed])[0], "failed")
+        self.assertEqual(d.ci_status([pending] + GREEN)[0], "pending")
+        self.assertEqual(d.ci_status(GREEN)[0], "cleared")
+        running = [{**GREEN[0], "status": "IN_PROGRESS", "conclusion": ""}] + GREEN[1:]
+        self.assertEqual(d.ci_status(running)[0], "pending")  # a skip whose reusable job still runs
+        self.assertEqual(d.ci_status(running[1:2] + [{**GREEN[0], "status": "QUEUED", "conclusion": ""}])[0],
+                         "pending")
+
+    def test_change_round_cap_comments_once_then_stays_quiet(self):
+        s = snap(reviews=[review("me", "CHANGES_REQUESTED", "h0", rid=1, at="2026-10-26T09:00:00Z"),
+                          review("me", "CHANGES_REQUESTED", "h1", rid=2)])
+        _, acts, note = d.decide(s, d.Row(), files_since_last=["api/x.py"], head_age_min=60)
+        self.assertEqual([a.kind for a in acts], ["cap_comment"])
+        self.assertIn("2 change requests", note)
+        self.assertEqual(d.decide(s, d.Row(cap_commented=1), files_since_last=["api/x.py"], head_age_min=60)[1], [])
+        s.review_requests = {"me"}  # a re-request still gets a re-review
+        self.assertEqual([a.kind for a in d.decide(s, d.Row(cap_commented=1), files_since_last=["api/x.py"])[1]],
+                         ["rereview"])
 
     def test_same_head_no_call(self):
         s = snap(review_requests={"me"})

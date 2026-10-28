@@ -43,6 +43,18 @@ def request_reviewer(n):
     if not 200 <= status < 300:
         raise RuntimeError(f"request {REVIEWER} on #{n}: HTTP {status or 'no response'} {err[:150]}")
 
+CAP_COMMENT = ("Automated review: this PR has had {rounds} change requests from me, so new commits no longer start "
+               "an automatic re-review. When it is ready for another look, re-request my review, or let's talk it "
+               "through.")
+
+
+def cap_comment(n, rounds):
+    """One comment telling the author that automatic re-reviews stopped at the change-round cap."""
+    status, _, err = post._api("-X", "POST", f"repos/{REPO}/issues/{n}/comments",
+                               "-f", f"body={CAP_COMMENT.format(rounds=rounds)}")
+    if not 200 <= status < 300:
+        raise RuntimeError(f"cap comment on #{n}: HTTP {status or 'no response'} {err[:150]}")
+
 
 def fix_draft(n, head, review_id):
     """Draft fixes for one CHANGES_REQUESTED review into drafts/PR-n-review-id.patch. Never pushes.
