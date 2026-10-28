@@ -13,6 +13,7 @@ Status: prwatch/status.json every tick, for any external status line.
 """
 
 import argparse
+import concurrent.futures
 import datetime
 import json
 import os
@@ -40,6 +41,10 @@ ALLOW_REQUEST_CHANGES = os.environ.get("PRWATCH_ALLOW_REQUEST_CHANGES") == "1"
 # last master move that touched its files.
 BRAIN_REFRESH = os.environ.get("PRWATCH_BRAIN_REFRESH") == "1"
 BRAIN_SETTLE_MIN = int(os.environ.get("PRWATCH_BRAIN_SETTLE_MIN", "60") or 60)
+# Model runs at once (reviews and fix drafts), each on a worker thread so polling goes on meanwhile.
+MAX_PARALLEL = max(1, int(os.environ.get("PRWATCH_MAX_PARALLEL", "1") or 1))
+POOL = None     # ThreadPoolExecutor, made in main()
+RUNNING = {}    # job key -> (future, action); touched by the main thread only
 WAIT_RECHECK_MIN = 1  # an approval waiting for CI looks again after this long
 MODEL_RETRY_MIN = (10, 30)  # after the 3rd failed model run the job is stuck
 DB = os.environ.get("PRWATCH_DB", "/data/state.db")
@@ -111,7 +116,7 @@ def keep_verdict(store, a, key, v, tries):
                      model_tries=tries, verdict_json=json.dumps(v), next_try_at="", last_error="")
 
 
-def run_review(store, a):
+def run_review(store, a, reviewer=None):
     """Model run for one review job; stores the verdict as state 'post'."""
     key = f"review:{a.pr}:{a.head}"
     job = store.job(key)
@@ -133,7 +138,7 @@ def run_review(store, a):
             log(f"#{a.pr} previous review at {a.base[:7]} not readable: {exc}")
     cid = store.start_call(a.pr, a.kind, review.MODEL, a.head, a.reason)
     try:
-        v, err, base, usage = review.run(a.pr, a.head, a.base, prev_body)
+        v, err, base, usage = review.run(a.pr, a.head, a.base, prev_body, reviewer=reviewer)
     except Exception as exc:  # git or gh failure while preparing
         v, err, base, usage = None, f"prepare failed: {exc}", "", None
     store.end_call(cid, "verdict " + v["verdict"] if v else err, usage)
@@ -212,6 +217,68 @@ def brain_status(store):
             "due": sum(r["state"] == "due" for r in rows), "stuck": [r["slug"] for r in rows if r["state"] == "stuck"]}
 
 
+# ------------------------------------------------------------------ workers
+
+def run_fix_draft(store, a):
+    """Model run drafting fixes for one CHANGES_REQUESTED review on my PR. True when a draft was made."""
+    cid = store.start_call(a.pr, a.kind, review.MODEL, a.head, a.reason)
+    try:
+        outcome, usage = act.fix_draft(a.pr, a.head, a.review_id)
+    except post.AuthBroken:
+        raise
+    except Exception as exc:
+        outcome, usage = f"fix draft failed: {exc}", None
+    store.end_call(cid, outcome, usage)
+    log(f"#{a.pr} fix draft at {a.head[:7]}: {outcome}{usage_note(usage)}", notify=True)
+    return not outcome.startswith("fix draft failed")
+
+
+def job_key(a):
+    return f"fix:{a.pr}:{a.review_id}" if a.kind == "fix_draft" else f"review:{a.pr}:{a.head}"
+
+
+def _work(a):
+    """One model job on a worker thread, with its own database connection. Its result (fix drafts only)
+    is collected by harvest() on the main thread, which alone writes PR rows."""
+    store = Store(DB)
+    try:
+        if a.kind == "fix_draft":
+            return run_fix_draft(store, a)
+        run_review(store, a)
+    except post.AuthBroken as exc:
+        store.set_meta("auth_broken", f"worker: {exc}")
+        log(f"GitHub auth broken in #{a.pr} {a.kind}: {exc}; every write paused", notify=True)
+    except Exception as exc:
+        log(f"#{a.pr} {a.kind} crashed: {exc}", notify=True)
+    finally:
+        store.db.close()
+    return None
+
+
+def dispatch(a):
+    """Start a model job on a worker unless it runs already or every worker is busy. Returns a note."""
+    key = job_key(a)
+    if key in RUNNING:
+        return f"{a.kind} running"
+    if len(RUNNING) >= MAX_PARALLEL:
+        return f"{a.kind} waits: {MAX_PARALLEL} model runs busy"
+    RUNNING[key] = (POOL.submit(_work, a), a)
+    log(f"#{a.pr} {a.kind} started at {a.head[:7]} ({a.reason or a.base[:7]}); {len(RUNNING)} running")
+    return ""
+
+
+def harvest(store):
+    """Collect finished jobs: free their slot; a drafted fix records its review id on the PR row."""
+    for key, (fut, a) in list(RUNNING.items()):
+        if not fut.done():
+            continue
+        del RUNNING[key]
+        if a.kind == "fix_draft" and fut.result() is True:
+            row, note = store.row(a.pr)
+            row.last_fix_review_id = a.review_id
+            store.save(a.pr, row, note)
+
+
 # --------------------------------------------------------------------- tick
 
 def handle_pr(store, snap, pinned, me):
@@ -255,20 +322,8 @@ def handle_pr(store, snap, pinned, me):
             act.request_reviewer(a.pr)
             row.last_rerequest_head = a.head
             log(f"#{a.pr} requested {d.REVIEWER} at {a.head[:7]}", notify=True)
-        elif a.kind in ("review", "rereview"):
-            run_review(store, a)
-        elif a.kind == "fix_draft":
-            cid = store.start_call(a.pr, a.kind, review.MODEL, a.head, a.reason)
-            try:
-                outcome, usage = act.fix_draft(a.pr, a.head, a.review_id)
-            except post.AuthBroken:
-                raise
-            except Exception as exc:
-                outcome, usage = f"fix draft failed: {exc}", None
-            store.end_call(cid, outcome, usage)
-            log(f"#{a.pr} fix draft at {a.head[:7]}: {outcome}{usage_note(usage)}", notify=True)
-            if not outcome.startswith("fix draft failed"):
-                row.last_fix_review_id = a.review_id
+        elif a.kind in d.MODEL_KINDS:
+            note = dispatch(a) or note
     if note and note != last_note:
         log(f"#{snap.number} ({role}) {note}", notify=not note.startswith(("waiting", "draft")))
     if not DRY:
@@ -284,6 +339,7 @@ def tick(store, me):
             return f"AUTH BROKEN {broken}"
         store.set_meta("auth_broken", "")
         log(f"GitHub auth works again as {me}; resuming", notify=True)
+    harvest(store)
     try:
         pinned = pins()
         calls_before = store.calls_today()
@@ -297,7 +353,7 @@ def tick(store, me):
         if not DRY:
             drain_posts(store)
             try:
-                brain_step(store, model_call_made=store.calls_today() > calls_before)
+                brain_step(store, model_call_made=bool(RUNNING) or store.calls_today() > calls_before)
             except Exception as exc:  # the brain never stops the review loop
                 log(f"brain step failed: {exc}", notify=True)
     except post.AuthBroken as exc:
@@ -318,6 +374,24 @@ def write_status(store, me, state):
                    for j in store.recent_posted()],
     }
     atomic_write(STATUS, json.dumps(status, indent=1) + "\n")
+
+
+def hand_review(store, n, test=False, reviewer_model=None):
+    """Review PR n now, whatever the rules say. test=True runs everything but posts nothing and prints the
+    review; otherwise the verdict is stored and posted like any other."""
+    head = json.loads(fetch.gh("pr", "view", str(n), "--repo", fetch.REPO, "--json", "headRefOid"))["headRefOid"]
+    row, _ = store.row(n)
+    base = row.last_reviewed_head if row.last_reviewed_head and row.last_reviewed_head != head else ""
+    if test:
+        prev = fetch.previous_review(n, base) if base else ""
+        v, err, _, usage = review.run(n, head, base, prev, reviewer=reviewer_model)
+        print(render.body(v, head, f"review:{n}:{head}") if v else f"no verdict: {err}")
+        print(f"(test run, nothing posted{usage_note(usage)})")
+        return 0 if v else 1
+    run_review(store, d.Action(kind="rereview" if base else "review", pr=n, head=head, base=base, reason="by hand"),
+               reviewer=reviewer_model)
+    drain_posts(store)
+    return 0
 
 
 def brain_undo(store, folder_slug, date):
@@ -351,7 +425,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--brain-backfill", action="store_true", help="bring reference leaves up to master")
-    ap.add_argument("--dry-run", action="store_true", help="with --brain-backfill: list and estimate only")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="decide and log what a pass would do, change nothing; with --brain-backfill: list only")
+    ap.add_argument("--review", type=int, metavar="PR", help="review this PR now, whatever the rules say")
+    ap.add_argument("--test", action="store_true", help="with --review: run it, print the review, post nothing")
+    ap.add_argument("--reviewer-model", help="with --review: the reviewer subagent's model (e.g. sonnet)")
     ap.add_argument("--budget-usd", type=float, default=5.0, help="with --brain-backfill: stop at this spend")
     ap.add_argument("--only", help="with --brain-backfill: comma-separated leaf slugs")
     ap.add_argument("--brain-undo", metavar="FOLDER/SLUG", help="restore a refreshed leaf's backup")
@@ -362,10 +440,15 @@ def main():
     brain.log_event = lambda msg: log(f"brain: {msg}")
     if args.brain_backfill or args.brain_undo:
         return brain_command(store, args)
+    if args.review:
+        return hand_review(store, args.review, args.test, args.reviewer_model)
+    global DRY, POOL
+    DRY = DRY or args.dry_run
+    POOL = concurrent.futures.ThreadPoolExecutor(MAX_PARALLEL, thread_name_prefix="model")
     me = fetch.gh("api", "user", "--jq", ".login").strip()
     log(f"start as {me}: interval {INTERVAL}s, caps {DAILY_CAP}/day {PER_PR_CAP}/PR/day, "
         f"approvals {'enabled' if ALLOW_APPROVE else 'off (comments only)'}, "
-        f"request changes {'enabled' if ALLOW_REQUEST_CHANGES else 'off'}, "
+        f"request changes {'enabled' if ALLOW_REQUEST_CHANGES else 'off'}, {MAX_PARALLEL} parallel, "
         f"claude: {act.claude_auth.state()[1]}")
     last_state = ""
     while True:
@@ -382,6 +465,8 @@ def main():
         except Exception as exc:
             print(f"{stamp()} status write failed: {exc}", flush=True)
         if args.once:
+            POOL.shutdown(wait=True)
+            harvest(store)
             return 0
         time.sleep(INTERVAL)
 

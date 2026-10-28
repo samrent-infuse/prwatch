@@ -103,6 +103,84 @@ class Post(unittest.TestCase):
         self.assertEqual(self.run_post([(200, {"id": 9}, ""), (404, None, "")])[0][0], "retry")
 
 
+class Workers(unittest.TestCase):
+    """Model jobs run on worker threads; the main thread only starts them and collects them."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = Store(f"{self.tmp.name}/s.db")
+        self.addCleanup(self.store.db.close)
+        self.futures = []
+
+        def submit(fn, *args):
+            f = mock.Mock()
+            f.done.return_value = False
+            self.futures.append(f)
+            return f
+        for p in (mock.patch.object(main, "POOL", mock.Mock(submit=submit)), mock.patch.object(main, "RUNNING", {}),
+                  mock.patch.object(main, "MAX_PARALLEL", 2), mock.patch.object(main, "log")):
+            p.start()
+        self.addCleanup(mock.patch.stopall)
+
+    def test_dispatch_starts_up_to_the_limit_and_never_twice(self):
+        a1 = decide.Action(kind="review", pr=1, head="h1")
+        self.assertEqual(main.dispatch(a1), "")
+        self.assertEqual(main.dispatch(a1), "review running")
+        self.assertEqual(main.dispatch(decide.Action(kind="rereview", pr=2, head="h2", base="h1")), "")
+        self.assertIn("waits", main.dispatch(decide.Action(kind="review", pr=3, head="h3")))
+        self.assertEqual(len(self.futures), 2)
+
+    def test_harvest_frees_the_slot_and_records_a_drafted_fix(self):
+        a = decide.Action(kind="fix_draft", pr=4, head="h4", review_id=77)
+        main.dispatch(a)
+        self.futures[0].done.return_value = True
+        self.futures[0].result.return_value = True
+        main.harvest(self.store)
+        self.assertEqual(main.RUNNING, {})
+        self.assertEqual(self.store.row(4)[0].last_fix_review_id, 77)
+
+    def test_work_uses_its_own_store_and_reports_auth_breaks(self):
+        with mock.patch.object(main, "DB", f"{self.tmp.name}/s.db"), \
+                mock.patch.object(main, "run_review", side_effect=post.AuthBroken("HTTP 401")):
+            main._work(decide.Action(kind="review", pr=5, head="h5"))
+        self.assertIn("HTTP 401", self.store.get_meta("auth_broken"))
+
+
+class GitLock(unittest.TestCase):
+    def test_fetch_and_worktree_hold_the_lock_reads_do_not(self):
+        seen = {}
+
+        def fake_run(args, **kw):
+            seen[args[1]] = review.GIT_LOCK.locked()
+            return mock.Mock(stdout="", returncode=0)
+        with mock.patch.object(review.subprocess, "run", side_effect=fake_run):
+            review.git("fetch", "origin")
+            review.git("worktree", "add", "x", "h")
+            review.git("diff", "a", "b")
+        self.assertEqual(seen, {"fetch": True, "worktree": True, "diff": False})
+
+
+class HandReview(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = Store(f"{self.tmp.name}/s.db")
+        self.addCleanup(self.store.db.close)
+        mock.patch.object(main, "log").start()
+        mock.patch.object(main.fetch, "gh", return_value=json.dumps({"headRefOid": "h9"})).start()
+        self.addCleanup(mock.patch.stopall)
+
+    def test_test_mode_prints_the_body_and_posts_nothing(self):
+        with mock.patch.object(review, "run", return_value=(V_OK, "", "b1", None)) as run, \
+                mock.patch.object(post, "post") as p, mock.patch("builtins.print") as out:
+            main.hand_review(self.store, 9, test=True, reviewer_model="sonnet")
+        self.assertEqual(run.call_args.kwargs.get("reviewer"), "sonnet")
+        p.assert_not_called()
+        self.assertIsNone(self.store.job("review:9:h9"))
+        self.assertIn("Automated review (Claude Opus), reviewed at h9.", "".join(str(c) for c in out.call_args_list))
+
+
 class Drain(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

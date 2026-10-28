@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -61,9 +62,19 @@ BRAIN = "\n" + prompts.load("review-brain")
 BASE_MOVED = "\n" + prompts.load("review-base-moved")
 
 
+# Parallel runs share one clone: commands that write its refs or worktree list take turns.
+GIT_LOCK = threading.Lock()
+LOCKED_COMMANDS = ("fetch", "worktree")
+
+
 def git(*args, cwd=None, check=True):
-    return subprocess.run(["git", *args], cwd=cwd or REPO_DIR, capture_output=True, text=True,
-                          encoding="utf-8", check=check).stdout
+    def run():
+        return subprocess.run(["git", *args], cwd=cwd or REPO_DIR, capture_output=True, text=True,
+                              encoding="utf-8", check=check).stdout
+    if args and args[0] in LOCKED_COMMANDS:
+        with GIT_LOCK:
+            return run()
+    return run()
 
 
 def fetch_pr(n):
@@ -209,10 +220,11 @@ def keep_run(name, text):
         pass
 
 
-def run(n, head, base_prev="", prev_body=""):
-    """Return (verdict dict or None, error text, base used, usage dict or None)."""
+def run(n, head, base_prev="", prev_body="", reviewer=None):
+    """Return (verdict dict or None, error text, base used, usage dict or None). `reviewer` overrides the
+    reviewer subagent's model (otherwise reviewer_model() picks it from the diff)."""
     wt, inputs, base, rereview, moved = prepare(n, head, base_prev, prev_body)
-    reviewer, _ = reviewer_model((inputs / "input.diff").read_text(encoding="utf-8"))
+    reviewer = reviewer or reviewer_model((inputs / "input.diff").read_text(encoding="utf-8"))[0]
     brain_text, brain_dirs = brain_note(inputs)
     try:
         notes = "".join(note for name, note in (
