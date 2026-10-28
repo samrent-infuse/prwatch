@@ -3,7 +3,7 @@ import os
 # Before importing decide (through review): identity and policy are read at import time.
 os.environ.update(PRWATCH_ME="me,me-alt", PRWATCH_REVIEWER="reviewer-bot",
                   PRWATCH_REQUIRED_CHECK="scan-verdict", PRWATCH_REPO="example-org/example-repo",
-                  PRWATCH_SETTLE_MIN="30", PRWATCH_SKIP_TITLE="do not review",
+                  PRWATCH_SETTLE_MIN="30", PRWATCH_SKIP_TITLE="do not review", PRWATCH_WATCHED_AUTHORS="bob",
                   PRWATCH_MAX_CHANGE_ROUNDS="2",
                   PRWATCH_BRAIN_PATH_PREFIXES="app_[a-z_]+,api,deploy,scripts,tests")
 

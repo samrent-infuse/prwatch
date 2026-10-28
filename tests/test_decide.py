@@ -3,10 +3,11 @@ import os
 # Before importing decide: identity and policy are read at import time.
 os.environ.update(PRWATCH_ME="me,me-alt", PRWATCH_REVIEWER="reviewer-bot",
                   PRWATCH_REQUIRED_CHECK="scan-verdict", PRWATCH_REPO="example-org/example-repo",
-                  PRWATCH_SETTLE_MIN="30", PRWATCH_SKIP_TITLE="do not review",
+                  PRWATCH_SETTLE_MIN="30", PRWATCH_SKIP_TITLE="do not review", PRWATCH_WATCHED_AUTHORS="bob",
                   PRWATCH_MAX_CHANGE_ROUNDS="2")
 
 import unittest
+from unittest import mock
 
 from prwatch import decide as d
 GREEN = [
@@ -138,9 +139,26 @@ class Asked(unittest.TestCase):
     def test_pin_counts_as_request(self):
         self.assertEqual([a.kind for a in d.decide(snap(), d.Row(), pins=frozenset({1}))[1]], ["review"])
 
-    def test_draft_and_other_do_nothing(self):
-        self.assertEqual(d.decide(snap(draft=True, review_requests={"me-alt"}), d.Row())[1], [])
+    def test_other_does_nothing(self):
         self.assertEqual(d.decide(snap(), d.Row())[:2], ("other", []))
+
+    def test_watched_author_gets_a_first_review_unasked(self):
+        role, acts, _ = d.decide(snap(author="bob"), d.Row())
+        self.assertEqual((role, [a.kind for a in acts]), ("asked", ["review"]))
+
+    def test_watched_author_rereviewed_after_corrections(self):
+        s = snap(author="bob", reviews=[review("me", "CHANGES_REQUESTED", "h1")])
+        self.assertEqual([a.kind for a in d.decide(s, d.Row(), files_since_last=["api/x.py"])[1]], ["rereview"])
+
+    def test_draft_reviewed_only_when_my_review_is_requested(self):
+        self.assertEqual([a.kind for a in d.decide(snap(draft=True, review_requests={"me-alt"}), d.Row())[1]],
+                         ["review"])
+        self.assertEqual(d.decide(snap(draft=True, author="bob"), d.Row())[1], [])
+        with mock.patch.object(d, "REVIEW_DRAFTS", True):
+            self.assertEqual([a.kind for a in d.decide(snap(draft=True, author="bob"), d.Row())[1]], ["review"])
+
+    def test_my_own_draft_gets_nothing(self):
+        self.assertEqual(d.decide(snap(draft=True, author="me"), d.Row())[1:], ([], "draft"))
 
 
 class Mine(unittest.TestCase):

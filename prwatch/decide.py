@@ -14,6 +14,10 @@ from dataclasses import dataclass, field
 # Identity and policy come from the environment (prwatch.env, see README).
 ME = {x.strip() for x in os.environ.get("PRWATCH_ME", "").split(",") if x.strip()}  # my GitHub logins
 REVIEWER = os.environ.get("PRWATCH_REVIEWER", "").strip()  # requested on my ready PRs; empty = none
+# Teammates whose PRs get a first review without asking, then re-reviews like a requested PR.
+WATCHED = {x.strip() for x in os.environ.get("PRWATCH_WATCHED_AUTHORS", "").split(",") if x.strip()}
+# 1 = review every watched author's draft; otherwise a draft is reviewed only when my review is requested.
+REVIEW_DRAFTS = os.environ.get("PRWATCH_REVIEW_DRAFTS") == "1"
 # A check name prefix that must have passed before any model call (e.g. a scanner verdict); empty = none.
 REQUIRED_CHECK = os.environ.get("PRWATCH_REQUIRED_CHECK", "").strip()
 # Minutes a re-review waits for the head to stay unchanged, so a run of fix-up pushes costs one review;
@@ -100,7 +104,7 @@ def ci_cleared(checks):
 def role_of(snap, pins):
     if snap.author in ME:
         return "mine"
-    if snap.review_requests & ME or snap.number in pins:
+    if snap.review_requests & ME or snap.number in pins or snap.author in WATCHED:
         return "asked"
     if any(r["author"] in ME for r in snap.reviews):
         return "asked"  # reviewed it before: follow the author's corrections
@@ -121,7 +125,8 @@ def decide(snap, row, pins=frozenset(), files_since_last=None, head_age_min=None
     role = role_of(snap, pins)
     if any(k in snap.title.lower() for k in SKIP_TITLE):
         return role, [], "ignored: skip keyword in the title"
-    if snap.draft:
+    if snap.draft and not (role == "asked" and (snap.review_requests & ME or
+                                                (REVIEW_DRAFTS and snap.author in WATCHED))):
         return role, [], "draft"
     if role == "other":
         return role, [], ""
@@ -158,8 +163,9 @@ def _decide_asked(snap, row, pins, files_since_last, head_age_min=None, ci=(True
         return [], ""
     if not last:
         # A first review does not wait for CI, so it lands early; an approval still waits for CI at post time.
-        if snap.review_requests & ME or snap.number in pins:
-            return [Action("review", snap.number, snap.head, reason="review requested")], ""
+        if snap.review_requests & ME or snap.number in pins or snap.author in WATCHED:
+            why = "review requested" if snap.review_requests & ME or snap.number in pins else "watched author"
+            return [Action("review", snap.number, snap.head, reason=why)], ""
         return [], ""
     if not ci[0]:
         return [], f"waiting for CI: {ci[1]}"
