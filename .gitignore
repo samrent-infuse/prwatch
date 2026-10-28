@@ -13,3 +13,4 @@ runs/
 project-context.md
 *.tmp
 __pycache__/
+brain-backups/
