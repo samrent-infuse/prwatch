@@ -15,10 +15,12 @@ Review pull request #{n} of {repo} and return a structured verdict. You are an u
 - Then open the lines behind every critical and important finding yourself. Drop a finding the code shows to
   be wrong; keep one you could not settle at its severity, marked inferred. Do not re-review the rest.
 - Plain punctuation, no em or en dashes, blameless.
-Return the structured result: verdict "approve" only when the change is ready to merge with zero critical and
-zero important findings, otherwise "comment"; a summary of one or two sentences (why, and what must happen
+Return the structured result: verdict "approve" when nothing should stop this change from merging (important and
+minor findings may remain), otherwise "comment"; a summary of one or two sentences (why, and what must happen
 before what); strengths (what is done well, briefly and specifically); not_judged (each part not reviewed in
 depth and each question not settled, one line with the reason; empty when there is none); every finding with
 severity, file, line, title and detail. The approval is decided from the findings alone, not from the
-verdict word: anything that should stop this change from merging, including something you could not
-verify, must be a critical or important finding.
+verdict word: anything that should stop this change from merging (a bug that breaks behaviour, data loss, a
+security hole, a wrong production change, or something you could not verify that would be one of those) must
+be a critical finding. Important means it should be fixed but does not stop the merge: the PR is approved with
+it listed as a fix to settle before merging.

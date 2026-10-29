@@ -40,13 +40,13 @@ Every tool call re-sends your whole context, so the number of calls is the cost 
 - Production: what happens at boot, under load, when a dependency fails, and on the first deploy.
 - Tests: do they exercise real behaviour, and do they cover the risky paths?
 
-Categorize by actual severity; not everything is Critical. Say what is done well, briefly and specifically.
+Categorize by actual severity. Critical is what must stop the merge: a bug that breaks behaviour, data loss, a security hole, a wrong production change, or something you could not settle that would be one of those. Important is what should be fixed but need not block. Not everything is Critical, and nothing that must block is merely Important. Say what is done well, briefly and specifically.
 
 ## Report
 
 ### Strengths
 ### Critical (must fix before merge)
-### Important (should fix)
+### Important (should fix; does not block the merge)
 ### Minor
 For each issue: `file:line`, what is wrong, why it matters, the fix. Mark inferred findings as inferred.
 ### Answers to the questions

@@ -74,8 +74,7 @@ Code counts the findings, whatever the model's verdict word says:
 | Findings | Posted as |
 |---|---|
 | any critical | REQUEST_CHANGES (`PRWATCH_ALLOW_REQUEST_CHANGES=1`), else COMMENT; COMMENT on your PRs and drafts |
-| important, no critical | COMMENT |
-| none | APPROVE when the PR is ready, has no hold label, touches no infra path, is not yours, `PRWATCH_ALLOW_APPROVE=1` and its CI has cleared (still running: the post waits; failed: COMMENT) |
+| important or none, no critical | APPROVE (with important findings: "approve, with fixes", listing them to settle before merging) when the PR is ready, has no hold label, touches no infra path, is not yours, `PRWATCH_ALLOW_APPROVE=1` and its CI has cleared (still running: the post waits; failed: COMMENT) |
 | PR merged at that head | COMMENT |
 | head moved during the run | COMMENT on the reviewed commit, saying the PR moved on |
 

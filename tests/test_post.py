@@ -48,8 +48,11 @@ class Render(unittest.TestCase):
             event, reason = render.decide_event(v, pr, {"me"}, allow)
             self.assertEqual(event, "COMMENT", why)
             self.assertIn(why, reason)
+        # only a critical finding blocks: important ones are approved "with fixes" (Samuel, 2026-10-29)
         important = {**V_OK, "findings": [{"severity": "important", "title": "t", "detail": "d"}]}
-        self.assertEqual(render.decide_event(important, PR, set(), True), ("COMMENT", ""))
+        self.assertEqual(render.decide_event(important, PR, set(), True), ("APPROVE", ""))
+        self.assertEqual(render.decide_event(important, {**PR, "files": ["deploy/terraform/x.tf"]}, set(), True)[0],
+                         "COMMENT")  # the other gates still hold
         critical = {**V_OK, "findings": [{"severity": "critical", "title": "t", "detail": "d"}]}
         self.assertEqual(render.decide_event(critical, PR, set(), True, True), ("REQUEST_CHANGES", ""))
         self.assertEqual(render.decide_event(critical, PR, set(), True, False)[0], "COMMENT")
@@ -58,7 +61,7 @@ class Render(unittest.TestCase):
         # an approval waits for CI that is still running and is withheld when CI failed
         self.assertEqual(render.decide_event(V_OK, {**PR, "ci": ("pending", "E2E pending")}, set(), True)[0], "WAIT")
         self.assertEqual(render.decide_event(V_OK, {**PR, "ci": ("failed", "Lint failure")}, set(), True)[0], "COMMENT")
-        self.assertEqual(render.decide_event(important, {**PR, "ci": ("pending", "x")}, set(), True)[0], "COMMENT")
+        self.assertEqual(render.decide_event(important, {**PR, "ci": ("pending", "x")}, set(), True)[0], "WAIT")
         # the model's verdict word is not consulted: zero critical and important approves
         self.assertEqual(render.decide_event({**V_OK, "verdict": "comment"}, PR, set(), True), ("APPROVE", ""))
 
@@ -82,6 +85,18 @@ class Render(unittest.TestCase):
             self.assertIn(h, b)
         self.assertNotIn("### Important", b)  # empty sections are left out
         self.assertLess(b.index("### Critical"), b.index("### Minor"))
+
+    def test_approval_with_important_findings_says_with_fixes(self):
+        v = {**V_OK, "findings": [{"severity": "important", "title": "t", "detail": "d"},
+                                  {"severity": "important", "title": "u", "detail": "e"}]}
+        b = render.body(v, "abcdef1234", "review:1:abcdef1234", event="APPROVE")
+        self.assertIn("**Verdict: approve, with fixes: settle the 2 important findings before merging.**", b)
+        self.assertIn("**Verdict: approve.**", render.body(V_OK, "abcdef1234", "review:1:abcdef1234", event="APPROVE"))
+
+    def test_prompt_makes_blocking_findings_critical(self):
+        text = " ".join(review.PROMPT.split())
+        self.assertIn("must be a critical finding", text)
+        self.assertNotIn("must be a critical or important finding", text)
 
     def test_rereview_body_has_the_earlier_findings_table(self):
         v = {**V_OK, "kind": "rereview", "earlier": [{"finding": "null check", "status": "fixed", "checked_at": "a.py:4"}]}

@@ -64,9 +64,10 @@ def counts(v):
 
 def decide_event(v, pr, me_logins, allow_approve, allow_request_changes=False):
     """(event, withheld_reason). The model's own verdict word is not consulted: only the counted findings
-    decide. REQUEST_CHANGES on any critical finding (not on my PR or a draft, and only when enabled).
-    COMMENT on important findings. APPROVE on neither, when the PR is ready, unheld, touches no infra, is
-    not mine and its CI has cleared; WAIT while that CI is still running, COMMENT when it failed."""
+    decide. REQUEST_CHANGES on any critical finding (not on my PR or a draft, and only when enabled). With
+    no critical finding, APPROVE (important findings are approved "with fixes", Samuel 2026-10-29) when the
+    PR is ready, unheld, touches no infra, is not mine and its CI has cleared; WAIT while that CI is still
+    running, COMMENT when it failed."""
     if pr["merged_at_head"]:
         return "COMMENT", "merged before the review finished"
     c = counts(v)
@@ -78,8 +79,6 @@ def decide_event(v, pr, me_logins, allow_approve, allow_request_changes=False):
         if not allow_request_changes:
             return "COMMENT", "request changes not enabled (PRWATCH_ALLOW_REQUEST_CHANGES)"
         return "REQUEST_CHANGES", ""
-    if c["important"]:
-        return "COMMENT", ""
     if pr["author"] in me_logins:
         return "COMMENT", "own PR"
     if pr["draft"]:
@@ -107,6 +106,15 @@ def marker(key):
     return f"<!-- prwatch {key} -->"
 
 
+def verdict_line(event, v):
+    """The words after "Verdict:"; an approval with important findings says they are to be settled first."""
+    line = VERDICT_LINE.get(event, event.lower())
+    n = counts(v)["important"]
+    if event == "APPROVE" and n:
+        line += f", with fixes: settle the {n} important finding{'s' if n > 1 else ''} before merging"
+    return line
+
+
 def body(v, head, key, event="", moved_to=""):
     """The review as posted: heading, what was reviewed, the verdict line (when `event` is known), Strengths,
     the earlier findings' status (re-reviews), Critical, Important, Minor, Not judged, footer, hidden marker.
@@ -117,7 +125,7 @@ def body(v, head, key, event="", moved_to=""):
         reviewed += f" The PR has since moved to `{moved_to[:7]}`, which is reviewed on its own."
     summary = plain(v["summary"])
     lines = ["## Automated re-review" if rereview else "## Automated code review", "", reviewed, "",
-             f"**Verdict: {VERDICT_LINE.get(event, event.lower())}.** {summary}" if event else summary, ""]
+             f"**Verdict: {verdict_line(event, v)}.** {summary}" if event else summary, ""]
 
     def section(title, items):
         if items:
