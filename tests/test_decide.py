@@ -109,6 +109,17 @@ class Asked(unittest.TestCase):
         self.assertEqual([a.kind for a in acts], ["skip"])
         self.assertIn("docs-only", note)
 
+    def test_docs_push_answering_earlier_findings_is_rereviewed(self):
+        s = snap(reviews=[review("me", "COMMENTED", "h1")])
+        _, acts, _ = d.decide(s, d.Row(), files_since_last=["docs/a.md"], earlier_files={"docs/a.md"})
+        self.assertEqual([a.kind for a in acts], ["rereview"])
+
+    def test_rerequest_wins_over_docs_skip_skipped_head_and_ci(self):
+        s = snap(review_requests={"me"}, reviews=[review("me", "COMMENTED", "h1")], checks=GREEN[:3])
+        for row in (d.Row(), d.Row(skipped_head="h2")):
+            _, acts, _ = d.decide(s, row, files_since_last=["docs/a.md"], head_age_min=1)
+            self.assertEqual([(a.kind, a.reason) for a in acts], [("rereview", "review re-requested")])
+
     def test_skipped_head_stays_quiet(self):
         s = snap(reviews=[review("me", "COMMENTED", "h1")])
         self.assertEqual(d.decide(s, d.Row(skipped_head="h2"), files_since_last=["a.md"])[1], [])

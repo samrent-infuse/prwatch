@@ -118,10 +118,11 @@ def _my_last_reviewed_head(snap, row):
     return max(mine, key=lambda r: r["submitted"])["commit"] if mine else ""
 
 
-def decide(snap, row, pins=frozenset(), files_since_last=None, head_age_min=None):
+def decide(snap, row, pins=frozenset(), files_since_last=None, head_age_min=None, earlier_files=frozenset()):
     """Return (role, actions, note). `files_since_last`: paths changed between my last
     reviewed head and this head, or None when unknown (treated as non-trivial).
-    `head_age_min`: minutes since this head was first seen, or None when unknown (no settle wait)."""
+    `head_age_min`: minutes since this head was first seen, or None when unknown (no settle wait).
+    `earlier_files`: files my last review's findings point at (a docs push touching one is re-reviewed)."""
     role = role_of(snap, pins)
     if any(k in snap.title.lower() for k in SKIP_TITLE):
         return role, [], "ignored: skip keyword in the title"
@@ -133,7 +134,8 @@ def decide(snap, row, pins=frozenset(), files_since_last=None, head_age_min=None
     ok, why = ci_cleared(snap.checks)
     if role == "mine":
         return role, *(_decide_mine(snap, row) if ok else ([], f"waiting for CI: {why}"))
-    return role, *_decide_asked(snap, row, pins, files_since_last, head_age_min, ci=(ok, why))
+    return role, *_decide_asked(snap, row, pins, files_since_last, head_age_min, ci=(ok, why),
+                                earlier_files=earlier_files)
 
 
 def _decide_mine(snap, row):
@@ -154,7 +156,7 @@ def _decide_mine(snap, row):
     return acts, ""
 
 
-def _decide_asked(snap, row, pins, files_since_last, head_age_min=None, ci=(True, "")):
+def _decide_asked(snap, row, pins, files_since_last, head_age_min=None, ci=(True, ""), earlier_files=frozenset()):
     # Done is what GitHub shows (a review of mine on this head), not what was written locally.
     if any(r["author"] in ME and r["commit"] == snap.head for r in snap.reviews):
         return [], ""
@@ -167,14 +169,21 @@ def _decide_asked(snap, row, pins, files_since_last, head_age_min=None, ci=(True
             why = "review requested" if snap.review_requests & ME or snap.number in pins else "watched author"
             return [Action("review", snap.number, snap.head, reason=why)], ""
         return [], ""
+    # A re-request of my review is an explicit "look again": it skips the CI wait, the docs-only skip and the
+    # settle wait (an approval still waits for CI at post time).
+    rerequested = bool(snap.review_requests & ME)
+    if rerequested:
+        return [Action("rereview", snap.number, snap.head, base=last, reason="review re-requested")], ""
     if not ci[0]:
         return [], f"waiting for CI: {ci[1]}"
     if snap.head == row.skipped_head:
         return [], ""
-    if files_since_last is not None and all(TRIVIAL_PATH.search(f) for f in files_since_last):
+    # A docs-only push skips the model, unless it touches a file my earlier findings were about: then the push
+    # is the answer to the review (a decisions document, a runbook).
+    if (files_since_last is not None and all(TRIVIAL_PATH.search(f) for f in files_since_last)
+            and not set(files_since_last) & set(earlier_files)):
         return [Action("skip", snap.number, snap.head, base=last)], (
-            f"docs-only push since {last[:7]}; no model call, re-pin to force a review")
-    rerequested = bool(snap.review_requests & ME)
+            f"docs-only push since {last[:7]}; no model call, re-request my review to force one")
     rounds = sum(1 for r in snap.reviews if r["author"] in ME and r["state"] == "CHANGES_REQUESTED")
     if MAX_CHANGE_ROUNDS and rounds >= MAX_CHANGE_ROUNDS and not rerequested:
         note = f"{rounds} change requests: no automatic re-review; re-request my review to get one"

@@ -294,7 +294,10 @@ def handle_pr(store, snap, pinned, me):
     if role == "asked" and last and last != snap.head and snap.head != row.skipped_head \
             and not snap.draft and d.ci_cleared(snap.checks)[0]:
         files = fetch.files_between(last, snap.head)
-    role, actions, note = d.decide(snap, row, pinned, files, head_age_min)
+    earlier = store.job(f"review:{snap.number}:{last}") if last else None
+    earlier_files = {f.get("file") for f in json.loads(earlier["verdict_json"]).get("findings", [])
+                     if f.get("file")} if earlier and earlier["verdict_json"] else set()
+    role, actions, note = d.decide(snap, row, pinned, files, head_age_min, earlier_files)
     row.role = role
     if role == "asked" and not row.last_reviewed_head and last:
         row.last_reviewed_head = last
