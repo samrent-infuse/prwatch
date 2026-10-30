@@ -79,6 +79,26 @@ class Asked(unittest.TestCase):
         self.assertEqual(d.ci_status(running[1:2] + [{**GREEN[0], "status": "QUEUED", "conclusion": ""}])[0],
                          "pending")
 
+    def test_skipped_job_inside_a_reusable_workflow_passes_with_a_passing_sibling(self):
+        # the checks of a real PR: the scan job inside quality-gate skips by design while its sibling passes
+        def chk(name, status="COMPLETED", conclusion="SUCCESS"):
+            return {"name": name, "status": status, "conclusion": conclusion}
+        real = [chk("E2E Tests"), chk("Lint & Test"), chk("scan-verdict / open the scan report"),
+                chk("quality-gate / Code quality, dependencies and secrets"),
+                chk("quality-gate / Repository scan skipped", conclusion="SKIPPED"),
+                chk("quality-gate", conclusion="SKIPPED"), chk("validate-pair")]
+        self.assertEqual(d.ci_status(real), ("cleared", "cleared"))
+        # the sibling still running: pending, not cleared
+        running = [c if c["name"] != real[3]["name"] else chk(c["name"], "IN_PROGRESS", "") for c in real]
+        self.assertEqual(d.ci_status(running)[0], "pending")
+        # the sibling failed: failed
+        broken = [c if c["name"] != real[3]["name"] else chk(c["name"], conclusion="FAILURE") for c in real]
+        self.assertEqual(d.ci_status(broken)[0], "failed")
+        # nothing from that workflow passed (its jobs all skipped): the skip does not count as a pass
+        none_passed = [c for c in real if not c["name"].startswith("quality-gate")] + [
+            chk("quality-gate / Repository scan skipped", conclusion="SKIPPED"), chk("quality-gate", conclusion="SKIPPED")]
+        self.assertEqual(d.ci_status(none_passed)[0], "failed")
+
     def test_change_round_cap_comments_once_then_stays_quiet(self):
         s = snap(reviews=[review("me", "CHANGES_REQUESTED", "h0", rid=1, at="2026-10-26T09:00:00Z"),
                           review("me", "CHANGES_REQUESTED", "h1", rid=2)])
