@@ -76,9 +76,8 @@ def _family(name):
 
 def ci_status(checks):
     """("cleared" | "pending" | "failed", why). Cleared: every check completed and passed; a skipped check
-    passes only when a job of its workflow (`<workflow> / ...`) passed on the same head, so a caller that
-    skipped without running anything still blocks; REQUIRED_CHECK, when set, must have passed. A failed
-    check wins over a pending one."""
+    passes when a job of its workflow (`<workflow> / ...`) passed on the same head, and is pending until
+    then (never failed); REQUIRED_CHECK, when set, must have passed. A failed check wins over a pending one."""
     if not checks:
         return "pending", "no checks yet"
     passed = {c["name"] for c in checks if c["conclusion"] == "SUCCESS"}
@@ -90,9 +89,10 @@ def ci_status(checks):
             continue
         elif c["conclusion"] == "SKIPPED" and any(p.startswith(_family(c["name"]) + " / ") for p in passed):
             continue  # the caller of a reusable workflow, or a job inside one that skips by design
-        elif c["conclusion"] == "SKIPPED" and any(o["name"].startswith(_family(c["name"]) + " / ") and
-                                                  o["status"] != "COMPLETED" for o in checks):
-            pending = pending or f"{_family(c['name'])} / ... pending"  # the workflow's jobs are still running
+        elif c["conclusion"] == "SKIPPED":
+            # Nothing of its workflow passed yet: a push-event run skips the gate while the pull_request run
+            # that does the work has not reported. A skip is never a failure.
+            pending = pending or f"{_family(c['name'])} skipped, its run has not reported yet"
         else:
             return "failed", f"{c['name']} {c['conclusion'].lower()}"
     if pending:

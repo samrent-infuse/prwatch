@@ -114,7 +114,8 @@ def keep_verdict(store, a, key, v, tries):
     act.REVIEWS.mkdir(parents=True, exist_ok=True)
     (act.REVIEWS / f"PR-{a.pr}-{a.head[:7]}.md").write_text(render.body(v, a.head, key), encoding="utf-8")
     store.upsert_job(key, pr=a.pr, head=a.head, kind=a.kind, base_prev=a.base, state="post",
-                     model_tries=tries, verdict_json=json.dumps(v), next_try_at="", last_error="")
+                     model_tries=tries, verdict_json=json.dumps(v), next_try_at="", last_error="",
+                     verdict_at=stamp(), posted_event="", withheld="")
 
 
 def run_review(store, a, reviewer=None):
@@ -161,8 +162,10 @@ def drain_posts(store):
     for job in store.jobs_in("post"):
         if not due(job["next_try_at"]):
             continue
+        expired = bool(job["verdict_at"]) and job["verdict_at"] <= stamp(
+            datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=post.APPROVE_WAIT_MIN))
         outcome, detail, rid = post.post(job["pr"], job["head"], job["key"], json.loads(job["verdict_json"]),
-                                         ALLOW_APPROVE, ALLOW_REQUEST_CHANGES)
+                                         ALLOW_APPROVE, ALLOW_REQUEST_CHANGES, wait_expired=expired)
         if outcome == "wait":  # not a failure: no retry counted, logged when the reason changes
             store.upsert_job(job["key"], last_error=detail, next_try_at=later(WAIT_RECHECK_MIN))
             if detail != job["last_error"]:
@@ -176,11 +179,40 @@ def drain_posts(store):
                   "next_try_at": later(post.POST_BACKOFF_MIN[tries - 1]) if outcome == "retry" else ""}
         store.upsert_job(job["key"], **fields)
         if outcome == "posted":
+            event, _, why = detail.partition(" (")
+            if event in ("APPROVE", "COMMENT", "REQUEST_CHANGES"):
+                store.upsert_job(job["key"], posted_event=event, withheld=why.removesuffix(")"))
             row, note = store.row(job["pr"])
             row.last_reviewed_head = job["head"]
             store.save(job["pr"], row, note)
         log(f"#{job['pr']} post at {job['head'][:7]}: {outcome}, {detail}",
             notify=outcome in ("posted", "stuck"))
+
+
+def approve_later(store):
+    """A clean verdict posted as a COMMENT only because CI had not cleared gets its APPROVE once CI clears on
+    that same head. Gives up when the head moved, the PR closed, or another gate (hold label, infra, draft)
+    withholds it."""
+    for job in store.db.execute("SELECT * FROM jobs WHERE state='posted' AND posted_event='COMMENT' "
+                                "AND withheld LIKE 'CI %'").fetchall():
+        v = json.loads(job["verdict_json"])
+        if render.counts(v)["critical"]:
+            continue
+        pr = post.pr_facts(job["pr"], job["head"])
+        if pr["state"] != "OPEN" or pr["head"] != job["head"]:
+            store.upsert_job(job["key"], withheld="")
+            continue
+        event, why = render.decide_event(v, pr, d.ME, ALLOW_APPROVE, ALLOW_REQUEST_CHANGES)
+        if event == "WAIT":
+            continue
+        if event != "APPROVE":
+            store.upsert_job(job["key"], withheld="")
+            log(f"#{job['pr']} approval at {job['head'][:7]} stays withheld: {why}")
+            continue
+        outcome, detail, _ = post.approve(job["pr"], job["head"], job["key"])
+        if outcome == "posted":
+            store.upsert_job(job["key"], posted_event="APPROVE", withheld="")
+        log(f"#{job['pr']} approve later at {job['head'][:7]}: {outcome}, {detail}", notify=outcome == "posted")
 
 
 # -------------------------------------------------------------------- brain
@@ -356,6 +388,7 @@ def tick(store, me):
                 log(f"#{snap.number} error: {exc}", notify=True)
         if not DRY:
             drain_posts(store)
+            approve_later(store)
             try:
                 brain_step(store, model_call_made=bool(RUNNING) or store.calls_today() > calls_before)
             except Exception as exc:  # the brain never stops the review loop

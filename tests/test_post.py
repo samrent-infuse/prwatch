@@ -117,6 +117,16 @@ class Post(unittest.TestCase):
              mock.patch.object(post, "_api", side_effect=api_results) as api:
             return post.post(1, "h2", "review:1:h2", V_OK, True), api
 
+    def test_expired_ci_wait_posts_a_comment_saying_why(self):
+        marker = render.marker("review:1:h2")
+        with mock.patch.object(post, "pr_facts", return_value={**PR, "ci": ("pending", "E2E Tests pending")}), \
+                mock.patch.object(post, "existing_review", return_value=None), \
+                mock.patch.object(post, "_api", side_effect=[(200, {"id": 9}, ""),
+                                                             (200, {"id": 9, "body": marker}, "")]):
+            out, detail, _ = post.post(1, "h2", "review:1:h2", V_OK, True, wait_expired=True)
+        self.assertEqual(out, "posted")
+        self.assertEqual(detail, "COMMENT (CI not cleared after 60 min: E2E Tests pending)")
+
     def test_posted_and_read_back(self):
         marker = render.marker("review:1:h2")
         (out, detail, rid), _ = self.run_post([(200, {"id": 9}, ""), (200, {"id": 9, "body": "x " + marker}, "")])
@@ -299,6 +309,56 @@ class HandReview(unittest.TestCase):
         self.assertIn("Automated review (Claude Opus), reviewed at h9.", "".join(str(c) for c in out.call_args_list))
 
 
+class ApproveLater(unittest.TestCase):
+    """A clean verdict posted as a COMMENT because CI had not cleared gets its approval once CI clears."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = Store(f"{self.tmp.name}/s.db")
+        self.addCleanup(self.store.db.close)
+        self.store.upsert_job("review:1:h2", pr=1, head="h2", kind="review", state="posted",
+                              verdict_json=json.dumps(V_OK), posted_event="COMMENT",
+                              withheld="CI quality-gate skipped")
+        mock.patch.object(main, "log").start()
+        mock.patch.object(main, "ALLOW_APPROVE", True).start()
+        self.addCleanup(mock.patch.stopall)
+
+    def run_upgrade(self, pr, api_results=()):
+        with mock.patch.object(post, "pr_facts", return_value=pr), \
+                mock.patch.object(post, "_api", side_effect=list(api_results)) as api:
+            main.approve_later(self.store)
+        return api
+
+    def test_ci_cleared_posts_a_short_approval_once(self):
+        marker = render.marker("review:1:h2:approve")
+        api = self.run_upgrade({**PR, "ci": ("cleared", "")},
+                               [(200, {"id": 7}, ""), (200, {"id": 7, "body": marker}, "")])
+        payload = json.loads(Path(api.call_args_list[0].args[-1]).read_text())
+        self.assertEqual((payload["event"], payload["commit_id"]), ("APPROVE", "h2"))
+        self.assertIn("CI has cleared on `h2`", payload["body"])
+        self.assertIn("Automated review (Claude Opus), reviewed at h2.", payload["body"])
+        job = self.store.job("review:1:h2")
+        self.assertEqual((job["posted_event"], job["withheld"]), ("APPROVE", ""))
+        self.run_upgrade({**PR, "ci": ("cleared", "")}).assert_not_called()  # done: never twice
+
+    def test_ci_still_running_waits(self):
+        self.run_upgrade({**PR, "ci": ("pending", "E2E pending")}).assert_not_called()
+        self.assertEqual(self.store.job("review:1:h2")["withheld"], "CI quality-gate skipped")
+
+    def test_head_moved_or_other_gate_gives_up(self):
+        self.run_upgrade({**PR, "head": "h3", "ci": ("cleared", "")}).assert_not_called()
+        self.assertEqual(self.store.job("review:1:h2")["withheld"], "")
+        self.store.upsert_job("review:1:h2", withheld="CI x")
+        self.run_upgrade({**PR, "labels": ["hold"], "ci": ("cleared", "")}).assert_not_called()
+        self.assertEqual(self.store.job("review:1:h2")["withheld"], "")
+
+    def test_critical_verdict_is_never_upgraded(self):
+        bad = {**V_OK, "findings": [{"severity": "critical", "title": "t", "detail": "d"}]}
+        self.store.upsert_job("review:1:h2", verdict_json=json.dumps(bad))
+        self.run_upgrade({**PR, "ci": ("cleared", "")}).assert_not_called()
+
+
 class Drain(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -338,6 +398,18 @@ class Drain(unittest.TestCase):
         self.store.upsert_job("review:1:h2", next_try_at="")
         self.drain(("wait", "approval waits: CI E2E pending", None))
         self.assertEqual(self.logs.call_count, 1)  # same reason: not logged again
+
+    def test_posted_records_its_event_and_why(self):
+        self.drain(("posted", "COMMENT (CI Lint failure)", 5))
+        job = self.store.job("review:1:h2")
+        self.assertEqual((job["posted_event"], job["withheld"]), ("COMMENT", "CI Lint failure"))
+
+    def test_a_long_ci_wait_ends_in_a_comment(self):
+        self.store.upsert_job("review:1:h2", verdict_at="2026-01-01T00:00:00Z")
+        p = self.drain(("wait", "approval waits: CI E2E pending", None))
+        self.assertTrue(p.call_args.kwargs.get("wait_expired"))
+        self.store.upsert_job("review:1:h2", verdict_at="2999-01-01T00:00:00Z", next_try_at="")
+        self.assertFalse(self.drain(("wait", "x", None)).call_args.kwargs.get("wait_expired"))
 
     def test_not_due_is_left_alone(self):
         self.store.upsert_job("review:1:h2", next_try_at="2999-01-01T00:00:00Z")

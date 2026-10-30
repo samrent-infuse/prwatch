@@ -97,7 +97,11 @@ class Asked(unittest.TestCase):
         # nothing from that workflow passed (its jobs all skipped): the skip does not count as a pass
         none_passed = [c for c in real if not c["name"].startswith("quality-gate")] + [
             chk("quality-gate / Repository scan skipped", conclusion="SKIPPED"), chk("quality-gate", conclusion="SKIPPED")]
-        self.assertEqual(d.ci_status(none_passed)[0], "failed")
+        # every job of that workflow skipped: its real run has not reported yet, so pending, never failed
+        self.assertEqual(d.ci_status(none_passed)[0], "pending")
+        # the push-event run skips the gate; the pull_request run that scans has not started yet
+        early = [chk("Lint & Test", "IN_PROGRESS", ""), chk("quality-gate", conclusion="SKIPPED"), chk("validate-pair")]
+        self.assertEqual(d.ci_status(early)[0], "pending")
 
     def test_change_round_cap_comments_once_then_stays_quiet(self):
         s = snap(reviews=[review("me", "CHANGES_REQUESTED", "h0", rid=1, at="2026-10-26T09:00:00Z"),

@@ -6,6 +6,7 @@ auth (401/403: the caller pauses every GitHub write).
 """
 
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -16,6 +17,9 @@ from prwatch.decide import ME
 from prwatch.fetch import REPO, AuthBroken, check_list, gh
 
 POST_BACKOFF_MIN = (2, 10, 30, 60)
+# An approval waits this long for CI; then the review posts as a COMMENT (approve_later approves it once CI
+# clears on the same head).
+APPROVE_WAIT_MIN = int(os.environ.get("PRWATCH_APPROVE_WAIT_MIN", "60") or 60)
 
 
 def _api(*args):
@@ -58,9 +62,9 @@ def existing_review(n, head, key):
     return None
 
 
-def post(n, head, key, verdict, allow_approve, allow_request_changes=False):
-    """Return (outcome, detail, review_id); outcome "wait" means an approval waits for CI.
-    Raises AuthBroken on 401/403."""
+def post(n, head, key, verdict, allow_approve, allow_request_changes=False, wait_expired=False):
+    """Return (outcome, detail, review_id); outcome "wait" means an approval waits for CI, until
+    `wait_expired`, when it posts as a COMMENT saying why. Raises AuthBroken on 401/403."""
     pr = pr_facts(n, head)
     if pr["state"] == "CLOSED":
         return "dropped", "closed unmerged", None
@@ -73,9 +77,20 @@ def post(n, head, key, verdict, allow_approve, allow_request_changes=False):
     event, why = render.decide_event(verdict, pr, ME, allow_approve, allow_request_changes)
     if moved_to:
         event, why = "COMMENT", f"head moved to {moved_to[:7]}"
+    elif event == "WAIT" and wait_expired:
+        event, why = "COMMENT", f"CI not cleared after {APPROVE_WAIT_MIN} min: {why.removeprefix('CI ')}"
     elif event == "WAIT":
         return "wait", f"approval waits: {why}", None
-    payload = {"commit_id": head, "event": event, "body": render.body(verdict, head, key, event=event, moved_to=moved_to)}
+    body = render.body(verdict, head, key, event=event, moved_to=moved_to)
+    outcome, detail, rid = _post_review(n, head, key, event, body)
+    if outcome != "posted":
+        return outcome, detail, rid
+    return "posted", f"{event}" + (f" ({why})" if why else ""), rid
+
+
+def _post_review(n, head, key, event, body):
+    """POST one review pinned to `head`, then read it back by its marker. (outcome, detail, review_id)."""
+    payload = {"commit_id": head, "event": event, "body": body}
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as fh:
         json.dump(payload, fh)
     status, data, err = _api("-X", "POST", f"repos/{REPO}/pulls/{n}/reviews", "--input", fh.name)
@@ -86,4 +101,13 @@ def post(n, head, key, verdict, allow_approve, allow_request_changes=False):
     status, back, err = _api(f"repos/{REPO}/pulls/{n}/reviews/{data['id']}")
     if status != 200 or render.marker(key) not in ((back or {}).get("body") or ""):
         return "retry", f"read-back HTTP {status or 'no response'}", None  # existing_review finds it next time
-    return "posted", f"{event}" + (f" ({why})" if why else ""), data["id"]
+    return "posted", event, data["id"]
+
+
+def approve(n, head, key):
+    """A short APPROVE on `head` for a review posted there earlier as a COMMENT because CI had not cleared.
+    Its own marker (`<key>:approve`) keeps it apart from the review it approves."""
+    body = (f"Automated review: CI has cleared on `{head[:7]}`, so the review above is approved. Its findings "
+            "stand; settle any important ones before merging.\n\n"
+            + render.FOOTER.format(sha7=head[:7]) + "\n" + render.marker(key + ":approve") + "\n")
+    return _post_review(n, head, key + ":approve", "APPROVE", body)

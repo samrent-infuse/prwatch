@@ -50,7 +50,10 @@ CREATE TABLE IF NOT EXISTS jobs (
   verdict_json TEXT NOT NULL DEFAULT '',
   review_id INTEGER,
   last_error TEXT NOT NULL DEFAULT '',
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  verdict_at TEXT NOT NULL DEFAULT '',   -- when the verdict was stored (caps the wait for CI)
+  posted_event TEXT NOT NULL DEFAULT '', -- APPROVE, COMMENT or REQUEST_CHANGES as posted
+  withheld TEXT NOT NULL DEFAULT ''      -- why an approval was withheld; "CI ..." is retried by approve_later
 );
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 -- One row per reference leaf the brain refresh follows. sync_sha: the master commit the leaf was last
@@ -87,6 +90,10 @@ class Store:
         for col, typ in USAGE_COLUMNS:
             if col not in have:  # databases created before the usage columns
                 self.db.execute(f"ALTER TABLE calls ADD COLUMN {col} {typ}")
+        have_jobs = {r[1] for r in self.db.execute("PRAGMA table_info(jobs)")}
+        for col in ("verdict_at", "posted_event", "withheld"):
+            if col not in have_jobs:  # databases from before these columns
+                self.db.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
         if "reviewer" not in {r[1] for r in self.db.execute("PRAGMA table_info(calls)")}:
             self.db.execute("ALTER TABLE calls ADD COLUMN reviewer TEXT")  # databases from before it
         have = {r[1] for r in self.db.execute("PRAGMA table_info(prs)")}
