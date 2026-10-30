@@ -137,8 +137,7 @@ def _claude(prompt, cwd, add_dirs):
     if BRAIN_MAX_RUN_USD > 0:
         args += ["--max-budget-usd", f"{BRAIN_MAX_RUN_USD:g}"]
     try:
-        p = subprocess.run(args, cwd=cwd, env=review.scrubbed_env(), capture_output=True, text=True,
-                           encoding="utf-8", timeout=review.TIMEOUT_S)
+        p, _ = review.run_claude(args, cwd=cwd, timeout=review.TIMEOUT_S)
     except subprocess.TimeoutExpired:
         return "", 124
     return p.stdout or p.stderr, p.returncode

@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS calls (
   cache_read INTEGER,   -- figure, not what the subscription token is billed
   cache_write INTEGER,
   cost_usd REAL,
-  reviewer TEXT         -- the reviewer subagent's model for a review (opus, or the small model)
+  reviewer TEXT,        -- the reviewer subagent's model for a review (opus, or the small model)
+  account TEXT          -- which token paid: primary, second or desktop
 );
 -- One review per (PR, head): key review:<pr>:<head>. state: model (needs a verdict), post (verdict
 -- stored, not confirmed on GitHub), posted, dropped, stuck. The verdict is kept, so a retried post
@@ -94,8 +95,10 @@ class Store:
         for col in ("verdict_at", "posted_event", "withheld"):
             if col not in have_jobs:  # databases from before these columns
                 self.db.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
-        if "reviewer" not in {r[1] for r in self.db.execute("PRAGMA table_info(calls)")}:
-            self.db.execute("ALTER TABLE calls ADD COLUMN reviewer TEXT")  # databases from before it
+        have_calls = {r[1] for r in self.db.execute("PRAGMA table_info(calls)")}
+        for col in ("reviewer", "account"):
+            if col not in have_calls:  # databases from before these columns
+                self.db.execute(f"ALTER TABLE calls ADD COLUMN {col} TEXT")
         have = {r[1] for r in self.db.execute("PRAGMA table_info(prs)")}
         for col, typ in (("head_seen", "TEXT NOT NULL DEFAULT ''"), ("head_seen_at", "TEXT NOT NULL DEFAULT ''"),
                          ("cap_commented", "INTEGER NOT NULL DEFAULT 0")):
@@ -140,9 +143,10 @@ class Store:
 
     def end_call(self, call_id, outcome, usage=None):
         u = usage or {}
-        self.db.execute("UPDATE calls SET outcome=?, reviewer=?, " + ",".join(f"{c}=?" for c, _ in USAGE_COLUMNS)
-                        + " WHERE id=?", (outcome[:300], u.get("reviewer"), *(u.get(c) for c, _ in USAGE_COLUMNS),
-                                          call_id))
+        self.db.execute("UPDATE calls SET outcome=?, reviewer=?, account=?, "
+                        + ",".join(f"{c}=?" for c, _ in USAGE_COLUMNS) + " WHERE id=?",
+                        (outcome[:300], u.get("reviewer"), u.get("account"), *(u.get(c) for c, _ in USAGE_COLUMNS),
+                         call_id))
         self.db.commit()
 
     def reviewers_today(self):

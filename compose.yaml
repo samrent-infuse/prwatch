@@ -17,6 +17,8 @@ services:
         required: true
       - path: claude.env
         required: false
+      - path: claude2.env                # optional second plan's token (scripts/set-token.ps1 -Second)
+        required: false
     volumes:
       - ..:/inkhub                       # the parent folder: STOP, reviews/, this folder's logs
       - ${USERPROFILE}/.claude/.credentials.json:/host-claude/credentials.json:ro   # desktop login; read, never refreshed here

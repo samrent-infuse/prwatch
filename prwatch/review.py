@@ -91,13 +91,48 @@ def fetch_pr(n):
         f"+{BASE_BRANCH}:refs/remotes/origin/{BASE_BRANCH}")
 
 
-def scrubbed_env():
+def scrubbed_env(tok=None):
     env = {k: os.environ[k] for k in CLAUDE_ENV_KEEP if k in os.environ}
     env["DISABLE_AUTOUPDATER"] = "1"
-    tok = claude_auth.token()
+    tok = tok or claude_auth.token()
     if tok:
         env["CLAUDE_CODE_OAUTH_TOKEN"] = tok
     return env
+
+
+def _limited(p):
+    """The usage-limit text of a FAILED claude run, or "" (a successful run that only mentions limits is not one)."""
+    try:
+        out = json.loads(p.stdout or "")
+    except (json.JSONDecodeError, TypeError):
+        out = None
+    if isinstance(out, dict):
+        if not out.get("is_error") and out.get("subtype") == "success":
+            return ""
+        text = str(out.get("result") or "")
+    elif p.returncode != 0:
+        text = f"{p.stdout or ''} {p.stderr or ''}"
+    else:
+        return ""
+    return text if claude_auth.LIMIT_TEXT.search(text) else ""
+
+
+def run_claude(args, cwd, timeout):
+    """Run claude with the first usable token. When its plan reports the usage limit, mark that token until the
+    limit resets and run again on the next one. Returns (completed process, slot name used)."""
+    tried = set()
+    while True:
+        name, tok = claude_auth.pick()
+        p = subprocess.run(args, cwd=cwd, env=scrubbed_env(tok), capture_output=True, text=True,
+                           encoding="utf-8", timeout=timeout)
+        limit = _limited(p) if name else ""
+        if not limit:
+            return p, name
+        claude_auth.mark_limited(name, claude_auth.limit_reset(limit))
+        tried.add(name)
+        nxt, _ = claude_auth.pick()
+        if not nxt or nxt in tried:
+            return p, name
 
 
 def is_ancestor(a, b):
@@ -251,13 +286,13 @@ def reviewer_brief(inputs, n, head, base):
 def measure_context():
     """The fixed context every lean run starts from: one tiny Haiku call with the review run's flags (about a
     cent). Check it after a Claude Code update."""
-    p = subprocess.run(["claude", "-p", "Reply with OK", "--model", "haiku", *LEAN_ARGS, "--restricted",
-                        "--tools", "Read,Grep,Glob,Agent", "--allowedTools", "Read", "Grep", "Glob", "Agent",
-                        "--permission-mode", "dontAsk", "--permission-prompts", "none", "--output-format", "json",
-                        "--no-session-persistence"], cwd=REPO_DIR, env=scrubbed_env(), capture_output=True,
-                       text=True, encoding="utf-8", timeout=120)
+    p, name = run_claude(["claude", "-p", "Reply with OK", "--model", "haiku", *LEAN_ARGS, "--restricted",
+                          "--tools", "Read,Grep,Glob,Agent", "--allowedTools", "Read", "Grep", "Glob", "Agent",
+                          "--permission-mode", "dontAsk", "--permission-prompts", "none", "--output-format", "json",
+                          "--no-session-persistence"], cwd=REPO_DIR, timeout=120)
     u = usage_of(json.loads(p.stdout))
-    return {"context_tokens": u["in_tokens"] + u["cache_read"] + u["cache_write"], "cost_usd": u["cost_usd"]}
+    return {"context_tokens": u["in_tokens"] + u["cache_read"] + u["cache_write"], "cost_usd": u["cost_usd"],
+            "account": name}
 
 
 def budget_args():
@@ -300,7 +335,7 @@ def run(n, head, base_prev="", prev_body="", reviewer=None):
             n=n, repo=REPO, inputs=inputs, base=base, head=head, notes=notes,
             range_note=BASE_MOVED.format(branch=BASE_BRANCH) if moved else "",
             rereview=REREVIEW if rereview else "", reviewer=reviewer, brain=brain_text)
-        p = subprocess.run(
+        p, account = run_claude(
             ["claude", "-p", prompt, "--model", MODEL, "--effort", EFFORT, *LEAN_ARGS,
              # --tools limits what exists; dontAsk then denies anything not in --allowedTools,
              # and Read is confined to the cwd plus the --add-dir folders.
@@ -309,13 +344,13 @@ def run(n, head, base_prev="", prev_body="", reviewer=None):
              "--permission-mode", "dontAsk", "--permission-prompts", "none",
              "--output-format", "json", "--json-schema", json.dumps(render.SCHEMA),
              *budget_args(), "--no-session-persistence"],
-            cwd=wt, env=scrubbed_env(), capture_output=True, text=True, encoding="utf-8", timeout=TIMEOUT_S)
+            cwd=wt, timeout=TIMEOUT_S)
         keep_run(f"PR-{n}-{head[:7]}", {"prompt.md": prompt, "result.json": p.stdout or p.stderr})
         try:
             out = json.loads(p.stdout)
         except json.JSONDecodeError:
             return None, f"exit {p.returncode}, no JSON: {(p.stderr or p.stdout).strip()[:200]}", base, None
-        usage = {**usage_of(out), "reviewer": reviewer}
+        usage = {**usage_of(out), "reviewer": reviewer, "account": account}
         if out.get("is_error") or out.get("subtype") != "success":
             return None, f"claude {out.get('subtype')}: {str(out.get('result'))[:200]}", base, usage
         v, why = render.validate(out.get("structured_output"))

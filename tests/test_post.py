@@ -6,6 +6,7 @@ os.environ.update(PRWATCH_ME="me,me-alt", PRWATCH_REVIEWER="reviewer-bot",
                   PRWATCH_SETTLE_MIN="30", PRWATCH_SKIP_TITLE="do not review", PRWATCH_WATCHED_AUTHORS="bob",
                   PRWATCH_MAX_CHANGE_ROUNDS="2")
 
+import datetime
 import json
 import subprocess
 import tempfile
@@ -273,6 +274,65 @@ class MeasureContext(unittest.TestCase):
         args = run.call_args.args[0]
         self.assertIn("--strict-mcp-config", args)
         self.assertIn("haiku", args)
+
+
+class TokenFallback(unittest.TestCase):
+    """A second plan's token takes over when the first hits its usage limit, until the limit resets."""
+
+    def setUp(self):
+        from prwatch import claude_auth
+        self.auth = claude_auth
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for p in (mock.patch.object(claude_auth, "LIMITS", Path(tmp.name) / "token_limits.json"),
+                  mock.patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": "tok-1", "PRWATCH_SECOND_OAUTH_TOKEN": "tok-2"}),
+                  mock.patch.object(claude_auth, "_oauth", return_value={})):
+            p.start()
+        self.addCleanup(mock.patch.stopall)
+
+    def test_primary_first_then_second_while_primary_is_limited(self):
+        self.assertEqual(self.auth.pick(), ("primary", "tok-1"))
+        self.auth.mark_limited("primary", datetime.datetime(2999, 1, 1, tzinfo=datetime.timezone.utc))
+        self.assertEqual(self.auth.pick(), ("second", "tok-2"))
+        self.assertIn("second token", self.auth.state()[1])
+        self.auth.mark_limited("second", datetime.datetime(2999, 1, 1, tzinfo=datetime.timezone.utc))
+        self.assertEqual(self.auth.pick(), (None, None))
+        self.assertFalse(self.auth.state()[0])
+
+    def test_a_past_limit_is_forgotten(self):
+        self.auth.mark_limited("primary", datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc))
+        self.assertEqual(self.auth.pick()[0], "primary")
+
+    def test_limit_reset_reads_the_epoch_or_backs_off(self):
+        at = self.auth.limit_reset("Claude AI usage limit reached|1900000000")
+        self.assertEqual(int(at.timestamp()), 1900000000)
+        later = self.auth.limit_reset("Too many requests")
+        self.assertGreater(later, datetime.datetime.now(datetime.timezone.utc))
+
+    def run_with(self, results):
+        outs = [mock.Mock(stdout=o, stderr="", returncode=rc) for o, rc in results]
+        with mock.patch.object(review.subprocess, "run", side_effect=outs) as run:
+            p, name = review.run_claude(["claude", "-p", "x"], cwd=".", timeout=10)
+        return p, name, run
+
+    def test_a_limited_run_is_retried_on_the_second_token(self):
+        limited = json.dumps({"is_error": True, "subtype": "error", "result": "Claude AI usage limit reached|1900000000"})
+        ok = json.dumps({"is_error": False, "subtype": "success", "result": "done"})
+        p, name, run = self.run_with([(limited, 1), (ok, 0)])
+        self.assertEqual((name, json.loads(p.stdout)["result"]), ("second", "done"))
+        self.assertEqual([c.kwargs["env"]["CLAUDE_CODE_OAUTH_TOKEN"] for c in run.call_args_list], ["tok-1", "tok-2"])
+        self.assertEqual(self.auth.pick()[0], "second")  # primary stays limited until its reset
+
+    def test_a_successful_run_mentioning_rate_limits_is_not_a_limit(self):
+        ok = json.dumps({"is_error": False, "subtype": "success", "result": "fix the rate limit handling"})
+        p, name, run = self.run_with([(ok, 0)])
+        self.assertEqual((name, run.call_count), ("primary", 1))
+        self.assertEqual(self.auth.pick()[0], "primary")
+
+    def test_an_ordinary_failure_is_not_a_limit(self):
+        p, name, run = self.run_with([(json.dumps({"is_error": True, "subtype": "error_max_turns", "result": "x"}), 1)])
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(self.auth.pick()[0], "primary")
 
 
 class GitLock(unittest.TestCase):

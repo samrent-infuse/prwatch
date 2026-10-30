@@ -40,6 +40,9 @@ then decides the event, renders the review, posts it pinned to the reviewed comm
 1. `cp prwatch.env.example prwatch.env` and `cp project-context.example.md project-context.md`; fill both in.
 2. Claude token: `claude setup-token`, then from this folder
    `powershell -ExecutionPolicy Bypass -File scripts\set-token.ps1` (reads it hidden, tests it, restarts).
+   Optional second plan: sign in to the other account, `claude setup-token`, then `scripts\set-token.ps1 -Second`
+   (saved to `claude2.env`). When a run fails on a plan's usage limit, that token is skipped until the limit
+   resets and the run is repeated on the next one; status shows which token is in use, the `calls` table which paid.
 3. Start: `GH_TOKEN=$(gh auth token) docker compose up -d --build` (`gh auth token -u <login>` with several accounts).
 
 ## Try it by hand

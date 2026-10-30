@@ -5,6 +5,9 @@
 #   2. From the prwatch folder: powershell -ExecutionPolicy Bypass -File scripts\set-token.ps1
 # The token is read hidden, tried with one tiny Haiku call in the prwatch image, and written to
 # claude.env only if that call works. It is never echoed or put on a command line.
+# With -Second the token goes to claude2.env as PRWATCH_SECOND_OAUTH_TOKEN: another plan's token, used while the
+# first plan is at its usage limit.
+param([switch]$Second)
 $ErrorActionPreference = "Stop"
 $secure = Read-Host "Paste the token from 'claude setup-token'" -AsSecureString
 $token = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)) -replace '\s', ''
@@ -19,8 +22,9 @@ try {
 } finally { Remove-Item Env:CLAUDE_CODE_OAUTH_TOKEN }
 if (-not $ok) { throw "Claude refused this token, nothing written: $($out.Trim())" }
 $root = Split-Path $PSScriptRoot -Parent  # the prwatch folder
-$envFile = Join-Path $root "claude.env"
-[IO.File]::WriteAllText($envFile, "CLAUDE_CODE_OAUTH_TOKEN=$token`n", (New-Object Text.UTF8Encoding $false))
+$envFile = Join-Path $root $(if ($Second) { "claude2.env" } else { "claude.env" })
+$envVar = if ($Second) { "PRWATCH_SECOND_OAUTH_TOKEN" } else { "CLAUDE_CODE_OAUTH_TOKEN" }
+[IO.File]::WriteAllText($envFile, "$envVar=$token`n", (New-Object Text.UTF8Encoding $false))
 Remove-Variable token, secure
 Write-Host "Token works; saved $envFile"
 $ghUser = (Select-String -Path (Join-Path $root "prwatch.env") -Pattern '^PRWATCH_GH_USER=(\S+)' |

@@ -65,7 +65,7 @@ def fix_draft(n, head, review_id):
     try:
         prompt = FIX_PROMPT.format(n=n, repo=REPO, head=head, author=r["user"]["login"],
                                    body=r.get("body") or "(empty)", comments=inline)
-        p = subprocess.run(
+        p, account = review.run_claude(
             ["claude", "-p", prompt, "--model", FIX_MODEL, "--effort", review.EFFORT,
              # no settings, hooks, MCP servers or skills from the checkout; its CLAUDE.md stays readable
              "--setting-sources", "user", "--strict-mcp-config", "--no-chrome", "--disable-slash-commands",
@@ -73,14 +73,13 @@ def fix_draft(n, head, review_id):
              "--allowedTools", "Read", "Edit", "Write", "Glob", "Grep",
              "--permission-mode", "acceptEdits", "--permission-prompts", "none", "--no-session-persistence",
              "--output-format", "json"],
-            cwd=wt, env=review.scrubbed_env(), capture_output=True, text=True, encoding="utf-8",
-            timeout=review.TIMEOUT_S)
+            cwd=wt, timeout=review.TIMEOUT_S)
         review.keep_run(f"fix-PR-{n}-review-{review_id}", {"prompt.md": prompt, "result.json": p.stdout or p.stderr})
         try:
             out = json.loads(p.stdout)
         except json.JSONDecodeError:
             out = {}
-        usage = review.usage_of(out) if out else None
+        usage = {**review.usage_of(out), "account": account} if out else None
         if p.returncode != 0 or out.get("is_error"):
             return f"fix draft failed: {(p.stderr or str(out.get('result'))).strip()[:200]}", usage
         text = str(out.get("result") or "")
